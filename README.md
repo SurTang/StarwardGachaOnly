@@ -8,7 +8,7 @@
 - 上游原始 README 保留在 `README.upstream.md`（本文件替换了它，便于一眼看出这是哪个项目）
 
 ---
-
+<img width="2560" height="1392" alt="02" src="https://github.com/user-attachments/assets/9e25c883-e2e5-4a78-9650-770c31554189" />
 <img width="2560" height="1386" alt="image" src="https://github.com/user-attachments/assets/e5e9b5ca-0663-4e25-add2-0c5b6ed33255" />
 
 ## 怎么编
