@@ -3,6 +3,8 @@
 [Starward](https://github.com/Scighost/Starward) 的独立抽卡记录应用（fork）源码。同一份源码树既能编出
 `Starward Gacha`，也能编出原生 Starward。
 
+- 蓝色大肥鱼改的，有问题把源码拉下来问她去 BY Deepseek Harness Desktop+Deepseek-v41-flash high
+  
 - 上游基线：`Scighost/Starward` `main` @ 2026-10-08（`game management`，commit `607a3077`）
 - 许可：MIT —— 上游 `LICENSE` 与署名原样保留
 - 上游原始 README 保留在 `README.upstream.md`（本文件替换了它，便于一眼看出这是哪个项目）
