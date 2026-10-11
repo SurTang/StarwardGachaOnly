@@ -1,0 +1,3077 @@
+diff --git a/src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs b/src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs
+new file mode 100644
+index 0000000..6aa1177
+--- /dev/null
++++ b/src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs
+@@ -0,0 +1,237 @@
++// Compatibility shim for the upstream "game management" refactor — NOT part of upstream Starward.
++//
++// Why this file exists
++// --------------------
++// Upstream commit 607a3077 "game management" (2026-10-08) removed the per-launcher overloads from
++// Starward.Core.HoYoPlay.HoYoPlayClient (the ones taking a launcherId plus a language) and moved
++// them, as launcher-bound methods, into the new Starward.GameManagement project. Starward.RPC and
++// Starward/Features/HoYoPlay/HoYoPlayService.cs still call the old shapes, so at that commit the
++// whole solution does not compile — upstream CI failed on it (Actions run #2322, "failure"), and
++// the snapshot this fork was created from inherits the breakage.
++//
++// What it does
++// ------------
++// Re-declares the legacy overloads as extension methods, so no upstream file has to be edited.
++// Each one routes the call to a HoYoPlayClient bound to the requested launcher: the launcher
++// catalog is static in Core (LauncherConfig.ChinaOfficial / GlobalOfficial / Bilibili*), so this is
++// a faithful implementation, not a stub — the game list, backgrounds, configs and branches all come
++// from the correct per-launcher endpoint again.
++//
++// Notes
++//   * Language is applied to the target client (the modern client reads LauncherConfig and
++//     Language from its instance); the per-launcher clients are cached process-wide.
++//   * The Sophon overloads accept the GameBranch the callers pass but only the GameBranchPackage is
++//     used, exactly like the current Core implementation.
++//   * Instance methods win over extension methods, so if upstream restores these overloads this
++//     file silently becomes dead code; delete it then.
++//
++// Nothing here is exercised by the standalone gacha build beyond the game list that GameSelector
++// needs, but the project has to compile.
++
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.Linq;
++using System.Net;
++using System.Net.Http;
++using System.Threading;
++using System.Threading.Tasks;
++
++namespace Starward.Core.HoYoPlay;
++
++public static class HoYoPlayClientLegacyOverloads
++{
++
++    private static readonly ConcurrentDictionary<string, HoYoPlayClient> _launcherClients = new();
++
++
++    private static LauncherConfig? ToLauncherConfig(string launcherId)
++    {
++        return launcherId switch
++        {
++            LauncherId.ChinaOfficial => LauncherConfig.ChinaOfficial,
++            LauncherId.GlobalOfficial => LauncherConfig.GlobalOfficial,
++            LauncherId.BilibiliGenshin => LauncherConfig.BilibiliGenshin,
++            LauncherId.BilibiliStarRail => LauncherConfig.BilibiliStarRail,
++            LauncherId.BilibiliZZZ => LauncherConfig.BilibiliZZZ,
++            _ => null,
++        };
++    }
++
++
++    /// <summary>
++    /// Returns a client bound to <paramref name="launcherId"/>, or <paramref name="fallback"/> when the
++    /// launcher is unknown (then the caller's own client configuration is used).
++    /// </summary>
++    private static HoYoPlayClient Resolve(HoYoPlayClient fallback, string launcherId, string? lang)
++    {
++        HoYoPlayClient client;
++        if (fallback.LauncherConfig?.Id == launcherId)
++        {
++            client = fallback;
++        }
++        else
++        {
++            LauncherConfig? config = ToLauncherConfig(launcherId);
++            if (config is null)
++            {
++                client = fallback;
++            }
++            else
++            {
++                client = _launcherClients.GetOrAdd(launcherId, id => new HoYoPlayClient(CreateHttpClient())
++                {
++                    LauncherConfig = ToLauncherConfig(id)!,
++                    Language = lang ?? "en-us",
++                });
++            }
++        }
++        if (!string.IsNullOrWhiteSpace(lang))
++        {
++            try
++            {
++                client.Language = lang;
++            }
++            catch (Exception)
++            {
++                // LanguageUtil rejects unknown values; keep the previous language in that case.
++            }
++        }
++        return client;
++    }
++
++
++    private static HttpClient CreateHttpClient()
++    {
++        return new HttpClient(new SocketsHttpHandler
++        {
++            AutomaticDecompression = DecompressionMethods.All,
++            EnableMultipleHttp2Connections = true,
++            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
++        })
++        {
++            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher,
++        };
++    }
++
++
++    #region list results (Starward/Features/HoYoPlay/HoYoPlayService.cs)
++
++
++    public static async Task<List<GameInfo>> GetGameInfoAsync(this HoYoPlayClient client, string launcherId, string? lang, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGameInfoAsync(cancellationToken);
++    }
++
++
++    public static async Task<List<GameBackgroundInfo>> GetGameBackgroundAsync(this HoYoPlayClient client, string launcherId, string? lang, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGameBackgroundAsync(cancellationToken);
++    }
++
++
++    public static async Task<GameContent> GetGameContentAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGameContentAsync(gameId, cancellationToken);
++    }
++
++
++    public static async Task<List<GamePackage>> GetGamePackageAsync(this HoYoPlayClient client, string launcherId, string? lang, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGamePackageAsync(null, cancellationToken);
++    }
++
++
++    public static async Task<List<GameConfig>> GetGameConfigAsync(this HoYoPlayClient client, string launcherId, string? lang, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGameConfigAsync(null, cancellationToken);
++    }
++
++
++    public static async Task<List<GameChannelSDK>> GetGameChannelSDKAsync(this HoYoPlayClient client, string launcherId, string? lang, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGameChannelSDKAsync(null, cancellationToken);
++    }
++
++
++    public static async Task<List<GameBranch>> GetGameBranchAsync(this HoYoPlayClient client, string launcherId, string? lang, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetGameBranchAsync(null, cancellationToken);
++    }
++
++
++    public static async Task<List<GameDXConfig>> GetDXConfigsAsync(this HoYoPlayClient client, string launcherId, string? lang, IEnumerable<GameId>? gameIds, IEnumerable<GPUInfo> gpuInfos, CancellationToken cancellationToken = default)
++    {
++        return await Resolve(client, launcherId, lang).GetDXConfigsAsync(gpuInfos, gameIds, cancellationToken);
++    }
++
++
++    #endregion
++
++
++    #region single results filtered by game id
++
++
++    public static async Task<GameConfig?> GetGameConfigAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        List<GameConfig>? list = await Resolve(client, launcherId, lang).GetGameConfigAsync(new[] { gameId }, cancellationToken);
++        return list?.FirstOrDefault(x => x.GameId == gameId);
++    }
++
++
++    public static async Task<GamePackage?> GetGamePackageAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        List<GamePackage>? list = await Resolve(client, launcherId, lang).GetGamePackageAsync(new[] { gameId }, cancellationToken);
++        return list?.FirstOrDefault(x => x.GameId == gameId);
++    }
++
++
++    public static async Task<GameBranch?> GetGameBranchAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        List<GameBranch>? list = await Resolve(client, launcherId, lang).GetGameBranchAsync(new[] { gameId }, cancellationToken);
++        return list?.FirstOrDefault(x => x.GameId == gameId);
++    }
++
++
++    public static async Task<GameChannelSDK?> GetGameChannelSDKAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        List<GameChannelSDK>? list = await Resolve(client, launcherId, lang).GetGameChannelSDKAsync(new[] { gameId }, cancellationToken);
++        return list?.FirstOrDefault(x => x.GameId == gameId);
++    }
++
++
++    public static async Task<GameDeprecatedFileConfig?> GetGameDeprecatedFileConfigAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        List<GameDeprecatedFileConfig>? list = await Resolve(client, launcherId, lang).GetGameDeprecatedFileConfigAsync(new[] { gameId }, cancellationToken);
++        return list?.FirstOrDefault(x => x.GameId == gameId);
++    }
++
++
++    public static async Task<WPFPackageInfo?> GetWPFPackageAsync(this HoYoPlayClient client, string launcherId, string? lang, GameId gameId, CancellationToken cancellationToken = default)
++    {
++        List<WPFPackageInfo>? list = await Resolve(client, launcherId, lang).GetWPFPackagesAsync(new[] { gameId }, cancellationToken);
++        return list?.FirstOrDefault(x => x.GameId == gameId);
++    }
++
++
++    #endregion
++
++
++    #region sophon (branch package only, the branch itself is context)
++
++
++    public static Task<GameSophonChunkBuild> GetGameSophonChunkBuildAsync(this HoYoPlayClient client, GameBranch gameBranch, GameBranchPackage gameBranchPackage, string? tag = null, CancellationToken cancellationToken = default)
++    {
++        return client.GetGameSophonChunkBuildAsync(gameBranchPackage, tag, cancellationToken);
++    }
++
++
++    public static Task<GameSophonPatchBuild> GetGameSophonPatchBuildAsync(this HoYoPlayClient client, GameBranch gameBranch, GameBranchPackage gameBranchPackage, CancellationToken cancellationToken = default)
++    {
++        return client.GetGameSophonPatchBuildAsync(gameBranchPackage, cancellationToken);
++    }
++
++
++    #endregion
++
++}
+diff --git a/src/Starward/App.xaml.cs b/src/Starward/App.xaml.cs
+index 35c5ada..fe47a2d 100644
+--- a/src/Starward/App.xaml.cs
++++ b/src/Starward/App.xaml.cs
+@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
+ using Microsoft.Windows.AppLifecycle;
+ using Starward.Core;
+ using Starward.Core.HoYoPlay;
++using Starward.Features.Gacha;
+ using Starward.Features.GameLauncher;
+ using Starward.Features.GamepadControl;
+ using Starward.Features.UrlProtocol;
+@@ -69,7 +70,7 @@ public partial class App : Application
+     {
+         string[] args = Environment.GetCommandLineArgs().Skip(1).ToArray();
+ 
+-        if (args.Length > 0 && args[0].ToLower().StartsWith("starward://test/"))
++        if (!GachaOnlyProfile.Enabled && args.Length > 0 && args[0].ToLower().StartsWith("starward://test/"))
+         {
+             new TestUrlProtocolWindow().Activate();
+             return;
+@@ -77,6 +78,13 @@ public partial class App : Application
+ 
+         await AppConfig.CheckEnviromentAsync();
+ 
++        // GachaOnly hook: headless "export records as an image" command
++        // (--export-gacha-image <out.png> [--uid N] [--game hk4e|hkrpg|nap]); exits by itself.
++        if (GachaOnlyProfile.Enabled && await GachaExportCli.TryRunAsync(args))
++        {
++            return;
++        }
++
+         if (args.Length > 0 && await HandleStartupAsync(args))
+         {
+             return;
+@@ -85,19 +93,28 @@ public partial class App : Application
+         instance = AppInstance.GetCurrent();
+         instance.Activated += AppInstance_Activated;
+ 
+-        var main = AppInstance.FindOrRegisterForKey("main");
++        // GachaOnly uses its own instance key: the standalone gacha app must never join the
++        // single-instance chain of a Starward build that happens to share the same app identity
++        // (otherwise a stale registration from another install silently redirects and exits).
++        var main = AppInstance.FindOrRegisterForKey(GachaOnlyProfile.Enabled ? "StarwardGacha" : "main");
+         if (!main.IsCurrent)
+         {
+             await main.RedirectActivationToAsync(instance.GetActivatedEventArgs());
+             Environment.Exit(0);
+         }
+-        if (Environment.GetCommandLineArgs().Contains("--hide"))
++        if (!GachaOnlyProfile.Enabled && Environment.GetCommandLineArgs().Contains("--hide"))
+         {
++            // upstream: start hidden in the system tray
+             m_SystemTrayWindow = new SystemTrayWindow();
+         }
+         else
+         {
+             m_MainWindow = new MainWindow();
++            if (GachaOnlyProfile.Enabled)
++            {
++                // distinct window / taskbar name for the standalone app
++                m_MainWindow.Title = GachaOnlyProfile.ProductName;
++            }
+             m_MainWindow.Activate();
+         }
+     }
+diff --git a/src/Starward/AppConfig.Configuration.cs b/src/Starward/AppConfig.Configuration.cs
+index f6b0e9e..fc05c21 100644
+--- a/src/Starward/AppConfig.Configuration.cs
++++ b/src/Starward/AppConfig.Configuration.cs
+@@ -1,5 +1,6 @@
+ using Microsoft.Win32;
+ using Starward.Features.Database;
++using Starward.Features.Gacha;
+ using Starward.Features.ViewHost;
+ using Starward.Helpers;
+ using Starward.Setup.Core;
+@@ -112,6 +113,12 @@ public static partial class AppConfig
+                 }
+             }
+ 
++            // GachaOnly hook: reuse the data folder of the user's existing Starward install so the
++            // gacha records are shared instead of duplicated. Returns null (upstream behaviour) in a
++            // plain Starward build, or when nothing is configured / no candidate exists.
++            // See Features/GachaOnly/GachaOnlyDataFolder.cs
++            userDataFolder = GachaOnlyDataFolder.Resolve() ?? userDataFolder;
++
+             if (Directory.Exists(userDataFolder))
+             {
+                 if (HaveWritePermission(userDataFolder))
+diff --git a/src/Starward/AppConfig.ServiceProvider.cs b/src/Starward/AppConfig.ServiceProvider.cs
+index 844ecf8..2eb12f2 100644
+--- a/src/Starward/AppConfig.ServiceProvider.cs
++++ b/src/Starward/AppConfig.ServiceProvider.cs
+@@ -43,11 +43,15 @@ public static partial class AppConfig
+         {
+             var logFolder = Path.Combine(CacheFolder, "log");
+             Directory.CreateDirectory(logFolder);
+-            LogFile = Path.Combine(logFolder, $"Starward_{DateTime.Now:yyMMdd}.log");
++            LogFile = Path.Combine(logFolder, $"{(GachaOnlyProfile.Enabled ? "StarwardGacha" : "Starward")}_{DateTime.Now:yyMMdd}.log");
+             Log.Logger = new LoggerConfiguration().WriteTo.File(path: LogFile, shared: true, outputTemplate: $$"""[{Timestamp:HH:mm:ss.fff}] [{Level:u4}] [{{Path.GetFileName(Environment.ProcessPath)}} ({{Environment.ProcessId}})] {SourceContext}{NewLine}{Message}{NewLine}{Exception}{NewLine}""")
+                                                   .Enrich.FromLogContext()
+                                                   .CreateLogger();
+             Log.Information($"Welcome to Starward v{AppVersion}\r\nSystem: {Environment.OSVersion}\r\nCommand Line: {Environment.CommandLine}");
++            if (GachaOnlyProfile.Enabled)
++            {
++                Log.Information($"Standalone gacha build; user data folder: {UserDataFolder} (resolved from {GachaOnlyDataFolder.ResolvedFrom ?? "upstream resolution"})");
++            }
+ 
+             var sc = new ServiceCollection();
+             sc.AddMemoryCache();
+diff --git a/src/Starward/Features/Gacha/GachaLogPage.xaml b/src/Starward/Features/Gacha/GachaLogPage.xaml
+index e382b6e..b7f068a 100644
+--- a/src/Starward/Features/Gacha/GachaLogPage.xaml
++++ b/src/Starward/Features/Gacha/GachaLogPage.xaml
+@@ -88,6 +88,27 @@
+                     </MenuFlyout>
+                 </SplitButton.Flyout>
+             </SplitButton>
++            <!--  GachaOnly hook: export buttons, styled like the settings button next to them (hidden in a stock build)  -->
++            <Button x:Name="Button_Export_Image"
++                    Height="32"
++                    Click="Button_Export_Image_Click">
++                <StackPanel Orientation="Horizontal" Spacing="8">
++                    <FontIcon Margin="0,2,0,0"
++                              FontSize="14"
++                              Glyph="&#xE91B;" />
++                    <TextBlock x:Name="TextBlock_Export_Image" />
++                </StackPanel>
++            </Button>
++            <Button x:Name="Button_Export_Count"
++                    Height="32"
++                    Click="Button_Export_Count_Click">
++                <StackPanel Orientation="Horizontal" Spacing="8">
++                    <FontIcon Margin="0,2,0,0"
++                              FontSize="14"
++                              Glyph="&#xE8FD;" />
++                    <TextBlock x:Name="TextBlock_Export_Count" />
++                </StackPanel>
++            </Button>
+             <!--  Setting  -->
+             <Button>
+                 <StackPanel Orientation="Horizontal" Spacing="8">
+@@ -212,6 +233,7 @@
+                                                         Content="{x:Bind LegacyFormatName}"
+                                                         CornerRadius="0,4,4,0" />
+                                             </Grid>
++                                            <!--  GachaOnly hook: the image export lives in the page toolbar, not here  -->
+                                             <!--  从 UIGF v3.0 / SRGF v1.0 / JSON 导入  -->
+                                             <Button x:Name="Button_Import"
+                                                     HorizontalAlignment="Stretch"
+diff --git a/src/Starward/Features/Gacha/GachaLogPage.xaml.cs b/src/Starward/Features/Gacha/GachaLogPage.xaml.cs
+index a1856b2..554c345 100644
+--- a/src/Starward/Features/Gacha/GachaLogPage.xaml.cs
++++ b/src/Starward/Features/Gacha/GachaLogPage.xaml.cs
+@@ -101,6 +101,12 @@ public sealed partial class GachaLogPage : PageBase
+         {
+             MenuFlyoutItem_CloudGame.Visibility = Visibility.Collapsed;
+         }
++        // GachaOnly hook: the two export buttons only exist in the standalone gacha build. The image
++        // export also shows the full record set as a banner report, hence the numeric prefix.
++        Button_Export_Image.Visibility = GachaOnlyProfile.Enabled ? Visibility.Visible : Visibility.Collapsed;
++        Button_Export_Count.Visibility = GachaOnlyProfile.Enabled ? Visibility.Visible : Visibility.Collapsed;
++        TextBlock_Export_Image.Text = GachaExportStrings.Current.ExportAsImage;
++        TextBlock_Export_Count.Text = GachaExportStrings.Current.ExportCounts;
+     }
+ 
+ 
+@@ -998,6 +1004,43 @@ public sealed partial class GachaLogPage : PageBase
+ 
+ 
+ 
++    /// <summary>
++    /// GachaOnly hook: opens the image export window for the selected account of the current game.
++    /// See Features/GachaOnly/GachaExportWindow.xaml.cs
++    /// </summary>
++    private void Button_Export_Image_Click(object sender, RoutedEventArgs e)
++    {
++        OpenGachaExportWindow(GachaExportMode.Records);
++    }
++
++
++    /// <summary>
++    /// GachaOnly hook: same window, showing the per-item pull counts instead of the records.
++    /// </summary>
++    private void Button_Export_Count_Click(object sender, RoutedEventArgs e)
++    {
++        OpenGachaExportWindow(GachaExportMode.Counts);
++    }
++
++
++    private void OpenGachaExportWindow(GachaExportMode mode)
++    {
++        try
++        {
++            if (SelectUid is not > 0)
++            {
++                return;
++            }
++            new GachaExportWindow(CurrentGameBiz, SelectUid.Value, mode).Activate();
++        }
++        catch (Exception ex)
++        {
++            _logger.LogError(ex, "Open gacha image export window");
++        }
++    }
++
++
++
+     [RelayCommand]
+     private async Task ExportGachaLogAsync(string format)
+     {
+diff --git a/src/Starward/Features/GachaOnly/GachaExportCard.xaml b/src/Starward/Features/GachaOnly/GachaExportCard.xaml
+new file mode 100644
+index 0000000..7a3230c
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaExportCard.xaml
+@@ -0,0 +1,57 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<!--  GachaOnly fork: the card that is rendered into the exported PNG.
++      Layout: one header, one column per banner (side by side), one footer — so the whole record set
++      fits in a single render and there are no page seams. Light themed and self-contained on
++      purpose, so the exported image looks the same whatever theme the app runs in.  -->
++<UserControl x:Class="Starward.Features.Gacha.GachaExportCard"
++             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
++             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
++             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
++             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
++             Width="1600"
++             HorizontalAlignment="Left"
++             mc:Ignorable="d">
++
++    <Border x:Name="Border_Root"
++            Padding="28"
++            Background="#FFF7F8FB"
++            BorderBrush="#FFE4E7EE"
++            BorderThickness="1"
++            CornerRadius="4">
++        <StackPanel Spacing="16">
++
++            <Grid>
++                <Grid.ColumnDefinitions>
++                    <ColumnDefinition Width="*" />
++                    <ColumnDefinition Width="Auto" />
++                </Grid.ColumnDefinitions>
++                <StackPanel Spacing="4">
++                    <TextBlock x:Name="TextBlock_Title"
++                               FontSize="24"
++                               FontWeight="SemiBold"
++                               Foreground="#FF151A23"
++                               TextWrapping="Wrap" />
++                    <TextBlock x:Name="TextBlock_Subtitle"
++                               FontSize="12.5"
++                               Foreground="#FF6B7280"
++                               TextWrapping="Wrap" />
++                </StackPanel>
++                <Image x:Name="Image_GameIcon"
++                       Grid.Column="1"
++                       Width="46"
++                       Height="46"
++                       VerticalAlignment="Top"
++                       Stretch="UniformToFill" />
++            </Grid>
++
++            <Grid x:Name="Grid_Body" ColumnSpacing="16" />
++
++            <TextBlock x:Name="TextBlock_Footer"
++                       Margin="0,2,0,0"
++                       FontSize="11"
++                       Foreground="#FF9AA1AC" />
++
++        </StackPanel>
++    </Border>
++
++</UserControl>
+diff --git a/src/Starward/Features/GachaOnly/GachaExportCard.xaml.cs b/src/Starward/Features/GachaOnly/GachaExportCard.xaml.cs
+new file mode 100644
+index 0000000..88f26e0
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaExportCard.xaml.cs
+@@ -0,0 +1,615 @@
++// GachaOnly fork — renders the export model into a XAML card that can be captured as a PNG.
++//
++// Layout choice (this is the interesting part):
++//   * one header + one footer + a two column "masonry" body:每 column is a stack of whole banner
++//     blocks, packed greedily by height (tallest block first, then into the currently shorter
++//     column);
++//   * compared to one-column-per-banner (the layout other record tools use) this avoids the large
++//     empty tail a short banner column leaves under a 90-item character banner, keeps the aspect
++//     ratio around 3:4 (comfortable to share) and still leaves room for 7 larger icons per row;
++//   * and compared to stacking one card per page it needs no stitching at all: the whole card is
++//     rendered in one RenderTargetBitmap pass, so there is no seam and the header is not repeated.
++//
++// The body is built in code instead of data templates so the wrapping grids have a deterministic
++// layout on the first pass.
++//
++// This file is new in the fork; upstream never touches it.
++
++using Microsoft.UI;
++using Microsoft.UI.Text;
++using Microsoft.UI.Xaml;
++using Microsoft.UI.Xaml.Controls;
++using Microsoft.UI.Xaml.Media;
++using Microsoft.UI.Xaml.Media.Imaging;
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using Windows.UI;
++
++namespace Starward.Features.Gacha;
++
++public sealed partial class GachaExportCard : UserControl
++{
++
++    /// <summary>Icon cells per row in a column (two column layout reserves less width).</summary>
++    private const int CellsPerRowMulti = 7;
++
++    private const int CellsPerRowSingle = 14;
++
++    private const double CellWidth = 96;
++
++    private const double CellHeight = 118;
++
++    /// <summary>Cell geometry for the count export (same width, slightly taller for the name line).</summary>
++    private const double CountCellHeight = 126;
++
++    private const double CountIconHeight = 96;
++
++    private const int MetricColumnsMulti = 4;
++
++    private const int MetricColumnsSingle = 8;
++
++    /// <summary>Used only for balancing the columns, not for the final layout.</summary>
++    private const int EstimateCellsPerRow = 7;
++
++
++    private static readonly Color Accent = Color.FromArgb(255, 0x1E, 0x9E, 0x5A);
++    private static readonly Color TextStrong = Color.FromArgb(255, 0x15, 0x1A, 0x23);
++    private static readonly Color TextSecondary = Color.FromArgb(255, 0x6B, 0x72, 0x80);
++    private static readonly Color TextFaint = Color.FromArgb(255, 0x9A, 0xA1, 0xAC);
++    private static readonly Color LineColor = Color.FromArgb(255, 0xE4, 0xE7, 0xEE);
++    private static readonly Color TileBackground = Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
++    private static readonly Color IconBackground = Color.FromArgb(255, 0xF1, 0xF3, 0xF8);
++    private static readonly Color UpColor = Color.FromArgb(255, 0x22, 0xC5, 0x5E);
++    private static readonly Color PlainColor = Color.FromArgb(255, 0x64, 0x74, 0x8B);
++    private static readonly Color CharacterCountColor = Color.FromArgb(255, 0x25, 0x63, 0xEB);
++    private static readonly Color YearPillBackground = Color.FromArgb(255, 0xED, 0xF0, 0xF5);
++
++    // pity pill background: 1-10 yellow, 11-40 blue, 41-75 purple, 76+ red
++    private static readonly Color PityLucky = Color.FromArgb(255, 0xE0, 0xA8, 0x00);
++    private static readonly Color PityNormal = Color.FromArgb(255, 0x3B, 0x82, 0xF6);
++    private static readonly Color PityLate = Color.FromArgb(255, 0x8B, 0x5C, 0xF6);
++    private static readonly Color PityWorst = Color.FromArgb(255, 0xEF, 0x44, 0x44);
++
++
++    private static Color PityColorFor(int pity)
++    {
++        return pity switch
++        {
++            <= 10 => PityLucky,
++            <= 40 => PityNormal,
++            <= 75 => PityLate,
++            _ => PityWorst,
++        };
++    }
++
++
++    public GachaExportCard()
++    {
++        this.InitializeComponent();
++    }
++
++
++    /// <summary>Fixed layout width of the card (see GachaExportCard.xaml).</summary>
++    public double CardWidth => Width;
++
++
++    /// <summary>Diagnostic: what the layout actually came out as (used by the export log).</summary>
++    internal string DescribeLayout()
++    {
++        var widths = Grid_Body.Children.OfType<FrameworkElement>().Select(x => $"{x.ActualWidth:F0}");
++        var heights = Grid_Body.Children.OfType<FrameworkElement>().Select(x => $"{x.ActualHeight:F0}");
++        return $"card={ActualWidth:F0}x{ActualHeight:F0} body={Grid_Body.ActualWidth:F0}x{Grid_Body.ActualHeight:F0} "
++               + $"columnWidths=[{string.Join(",", widths)}] columnHeights=[{string.Join(",", heights)}]";
++    }
++
++
++    internal void SetModel(GachaExportModel model)
++    {
++        TextBlock_Title.Text = model.Title;
++        TextBlock_Subtitle.Text = model.Subtitle;
++        TextBlock_Footer.Text = model.Footer;
++        if (!string.IsNullOrWhiteSpace(model.GameIcon))
++        {
++            Image_GameIcon.Source = new BitmapImage(new Uri(model.GameIcon));
++            Image_GameIcon.Visibility = Visibility.Visible;
++        }
++        else
++        {
++            Image_GameIcon.Visibility = Visibility.Collapsed;
++        }
++
++        Grid_Body.Children.Clear();
++        Grid_Body.ColumnDefinitions.Clear();
++
++        if (model.CountSections.Count > 0)
++        {
++            // counts layout: one full width column, a section per rarity
++            Grid_Body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
++            FrameworkElement counts = BuildCounts(model.CountSections);
++            Grid.SetColumn(counts, 0);
++            Grid_Body.Children.Add(counts);
++            return;
++        }
++
++        List<List<GachaExportBannerBlock>> columns = Pack(model.Banners);
++        int cellsPerRow = columns.Count <= 1 ? CellsPerRowSingle : CellsPerRowMulti;
++        int metricColumns = columns.Count <= 1 ? MetricColumnsSingle : MetricColumnsMulti;
++        for (int i = 0; i < columns.Count; i++)
++        {
++            Grid_Body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
++            FrameworkElement column = BuildColumn(columns[i], cellsPerRow, metricColumns);
++            Grid.SetColumn(column, i);
++            Grid_Body.Children.Add(column);
++        }
++    }
++
++
++    /// <summary>
++    /// The count-statistics card: one section per rarity, each a grid of icon cells carrying the
++    /// pull count. Sorted by the caller (count desc, characters before weapons, then name).
++    /// </summary>
++    private static FrameworkElement BuildCounts(List<GachaExportCountSection> sections)
++    {
++        var panel = new StackPanel { Spacing = 18 };
++        foreach (GachaExportCountSection section in sections)
++        {
++            var sectionPanel = new StackPanel { Spacing = 10 };
++            sectionPanel.Children.Add(BuildSectionCaption(section.Title));
++            var grid = new Grid();
++            for (int i = 0; i < CellsPerRowSingle; i++)
++            {
++                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(CellWidth) });
++            }
++            int rows = (section.Items.Count + CellsPerRowSingle - 1) / CellsPerRowSingle;
++            for (int i = 0; i < rows; i++)
++            {
++                grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CountCellHeight) });
++            }
++            for (int i = 0; i < section.Items.Count; i++)
++            {
++                FrameworkElement cell = BuildCountCell(section.Items[i]);
++                Grid.SetRow(cell, i / CellsPerRowSingle);
++                Grid.SetColumn(cell, i % CellsPerRowSingle);
++                grid.Children.Add(cell);
++            }
++            sectionPanel.Children.Add(grid);
++            if (!string.IsNullOrWhiteSpace(section.Note))
++            {
++                sectionPanel.Children.Add(new TextBlock
++                {
++                    Text = section.Note,
++                    FontSize = 10.5,
++                    Foreground = new SolidColorBrush(TextFaint),
++                });
++            }
++            panel.Children.Add(new Border
++            {
++                Background = new SolidColorBrush(TileBackground),
++                BorderBrush = new SolidColorBrush(LineColor),
++                BorderThickness = new Thickness(1),
++                CornerRadius = new CornerRadius(12),
++                Padding = new Thickness(14),
++                Child = sectionPanel,
++            });
++        }
++        return panel;
++    }
++
++
++    private static FrameworkElement BuildCountCell(GachaExportCountItem item)
++    {
++        GachaExportStrings strings = GachaExportStrings.Current;
++        var cell = new Grid { Margin = new Thickness(3, 0, 3, 6) };
++        cell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CountIconHeight) });
++        cell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
++        cell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
++
++        var frame = new Border
++        {
++            Background = new SolidColorBrush(IconBackground),
++            CornerRadius = new CornerRadius(10),
++        };
++        if (item.Icon is not null)
++        {
++            frame.Child = new Image { Source = item.Icon, Stretch = Stretch.Uniform, Margin = new Thickness(3) };
++        }
++        else
++        {
++            frame.Child = new TextBlock
++            {
++                Text = item.Name,
++                Margin = new Thickness(4),
++                FontSize = 10.5,
++                MaxLines = 3,
++                TextWrapping = TextWrapping.Wrap,
++                TextAlignment = TextAlignment.Center,
++                VerticalAlignment = VerticalAlignment.Center,
++                Foreground = new SolidColorBrush(TextSecondary),
++            };
++        }
++        Grid.SetRow(frame, 0);
++        cell.Children.Add(frame);
++
++        var count = new Border
++        {
++            Background = new SolidColorBrush(item.IsCharacter ? CharacterCountColor : PlainColor),
++            CornerRadius = new CornerRadius(7),
++            Padding = new Thickness(5, 0, 5, 1),
++            Margin = new Thickness(3, 3, 0, 0),
++            HorizontalAlignment = HorizontalAlignment.Left,
++            VerticalAlignment = VerticalAlignment.Top,
++            Child = new TextBlock
++            {
++                Text = $"{item.Count}{strings.CountsUnit}",
++                FontSize = 10.5,
++                FontWeight = FontWeights.SemiBold,
++                Foreground = new SolidColorBrush(Colors.White),
++            },
++        };
++        Grid.SetRow(count, 0);
++        cell.Children.Add(count);
++
++        var name = new TextBlock
++        {
++            Text = item.Name,
++            Margin = new Thickness(0, 3, 0, 0),
++            FontSize = 10.5,
++            MaxLines = 1,
++            TextTrimming = TextTrimming.CharacterEllipsis,
++            TextAlignment = TextAlignment.Center,
++            Foreground = new SolidColorBrush(TextSecondary),
++        };
++        Grid.SetRow(name, 1);
++        cell.Children.Add(name);
++
++        return cell;
++    }
++
++
++    /// <summary>
++    /// Greedy two column packing that keeps the caller's banner order: the first banner opens the
++    /// left column, every later banner goes into whichever column is currently shorter. With the
++    /// record-count ordering that puts the biggest banner on the left and keeps the event banner
++    /// above the permanent one on the right.
++    /// </summary>
++    private static List<List<GachaExportBannerBlock>> Pack(List<GachaExportBannerBlock> banners)
++    {
++        if (banners.Count == 0)
++        {
++            return [];
++        }
++        if (banners.Count == 1)
++        {
++            return [banners.ToList()];
++        }
++
++        int columnCount = 2;
++        var columns = new List<List<GachaExportBannerBlock>>();
++        var heights = new double[columnCount];
++        for (int i = 0; i < columnCount; i++)
++        {
++            columns.Add([]);
++        }
++        foreach (GachaExportBannerBlock banner in banners)
++        {
++            int target = 0;
++            for (int i = 1; i < columnCount; i++)
++            {
++                if (heights[i] < heights[target])
++                {
++                    target = i;
++                }
++            }
++            columns[target].Add(banner);
++            heights[target] += EstimateHeight(banner);
++        }
++        return columns.Where(x => x.Count > 0).ToList();
++    }
++
++
++    private static double EstimateHeight(GachaExportBannerBlock banner)
++    {
++        double height = 190; // title + metrics + captions + paddings
++        foreach (GachaExportHistoryGroup group in banner.History)
++        {
++            height += 24 + Math.Ceiling(group.Items.Count / (double)EstimateCellsPerRow) * (CellHeight + 6);
++        }
++        return height;
++    }
++
++
++    private static FrameworkElement BuildColumn(List<GachaExportBannerBlock> blocks, int cellsPerRow, int metricColumns)
++    {
++        var panel = new StackPanel { Spacing = 16 };
++        foreach (GachaExportBannerBlock block in blocks)
++        {
++            panel.Children.Add(BuildBannerBlock(block, cellsPerRow, metricColumns));
++        }
++        return panel;
++    }
++
++
++    private static FrameworkElement BuildBannerBlock(GachaExportBannerBlock banner, int cellsPerRow, int maxMetricColumns)
++    {
++        int metricColumns = MetricColumnsFor(banner.Metrics.Count, maxMetricColumns);
++        var panel = new StackPanel { Spacing = 10 };
++
++        var head = new Grid();
++        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
++        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
++        var title = new TextBlock
++        {
++            Text = banner.Title,
++            FontSize = 15,
++            FontWeight = FontWeights.SemiBold,
++            Foreground = new SolidColorBrush(TextStrong),
++            TextTrimming = TextTrimming.CharacterEllipsis,
++        };
++        var count = new TextBlock
++        {
++            Text = $"{banner.CountText} · {banner.TimeRangeText}",
++            Margin = new Thickness(8, 0, 0, 2),
++            FontSize = 11,
++            VerticalAlignment = VerticalAlignment.Bottom,
++            Foreground = new SolidColorBrush(TextFaint),
++        };
++        head.Children.Add(title);
++        Grid.SetColumn(count, 1);
++        head.Children.Add(count);
++        panel.Children.Add(head);
++
++        panel.Children.Add(new Border
++        {
++            Background = new SolidColorBrush(TileBackground),
++            BorderBrush = new SolidColorBrush(LineColor),
++            BorderThickness = new Thickness(1),
++            CornerRadius = new CornerRadius(10),
++            Padding = new Thickness(10, 8, 10, 8),
++            Child = BuildMetrics(banner.Metrics, metricColumns),
++        });
++
++        if (banner.History.Count > 0)
++        {
++            panel.Children.Add(BuildSectionCaption(GachaExportStrings.Current.History5));
++            foreach (GachaExportHistoryGroup group in banner.History)
++            {
++                panel.Children.Add(BuildYearGroup(group, cellsPerRow));
++            }
++        }
++
++        if (!string.IsNullOrWhiteSpace(banner.Note))
++        {
++            panel.Children.Add(new TextBlock
++            {
++                Text = banner.Note,
++                Margin = new Thickness(0, 2, 0, 0),
++                FontSize = 10.5,
++                TextWrapping = TextWrapping.Wrap,
++                Foreground = new SolidColorBrush(TextFaint),
++            });
++        }
++
++        return new Border
++        {
++            Background = new SolidColorBrush(TileBackground),
++            BorderBrush = new SolidColorBrush(LineColor),
++            BorderThickness = new Thickness(1),
++            CornerRadius = new CornerRadius(12),
++            Padding = new Thickness(14),
++            VerticalAlignment = VerticalAlignment.Top,
++            Child = panel,
++        };
++    }
++
++
++    private static FrameworkElement BuildSectionCaption(string text)
++    {
++        var grid = new Grid();
++        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
++        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
++        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
++        var left = new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Fill = new SolidColorBrush(LineColor), VerticalAlignment = VerticalAlignment.Center };
++        var right = new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Fill = new SolidColorBrush(LineColor), VerticalAlignment = VerticalAlignment.Center };
++        var label = new TextBlock
++        {
++            Text = text,
++            Margin = new Thickness(10, 0, 10, 0),
++            FontSize = 12,
++            FontWeight = FontWeights.SemiBold,
++            Foreground = new SolidColorBrush(TextSecondary),
++        };
++        Grid.SetColumn(label, 1);
++        grid.Children.Add(left);
++        grid.Children.Add(label);
++        Grid.SetColumn(right, 2);
++        grid.Children.Add(right);
++        return grid;
++    }
++
++
++    /// <summary>Picks a tile count per row that divides the metric count evenly when possible
++    /// (5-6 tiles in a 4-column layout would leave a lonely tile on the second row).</summary>
++    private static int MetricColumnsFor(int count, int max)
++    {
++        int columns = count switch
++        {
++            <= 1 => 1,
++            2 => 2,
++            3 => 3,
++            4 => 4,
++            5 or 6 => 3,
++            _ => max,
++        };
++        return Math.Min(columns, max);
++    }
++
++
++    private static Grid BuildMetrics(List<GachaExportMetric> metrics, int metricColumns)
++    {
++        var grid = new Grid { RowSpacing = 6 };
++        for (int i = 0; i < metricColumns; i++)
++        {
++            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
++        }
++        int rows = (metrics.Count + metricColumns - 1) / metricColumns;
++        for (int i = 0; i < rows; i++)
++        {
++            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
++        }
++        for (int i = 0; i < metrics.Count; i++)
++        {
++            GachaExportMetric metric = metrics[i];
++            var tile = new StackPanel { Spacing = 1, HorizontalAlignment = HorizontalAlignment.Center };
++            tile.Children.Add(new TextBlock
++            {
++                Text = metric.Value,
++                FontSize = 18,
++                FontWeight = FontWeights.SemiBold,
++                HorizontalAlignment = HorizontalAlignment.Center,
++                Foreground = new SolidColorBrush(metric.Emphasize ? Accent : TextStrong),
++            });
++            tile.Children.Add(new TextBlock
++            {
++                Text = metric.Label,
++                FontSize = 11,
++                HorizontalAlignment = HorizontalAlignment.Center,
++                Foreground = new SolidColorBrush(TextSecondary),
++            });
++            Grid.SetRow(tile, i / metricColumns);
++            Grid.SetColumn(tile, i % metricColumns);
++            grid.Children.Add(tile);
++        }
++        return grid;
++    }
++
++
++    private static FrameworkElement BuildYearGroup(GachaExportHistoryGroup group, int cellsPerRow)
++    {
++        var panel = new StackPanel { Spacing = 4 };
++        panel.Children.Add(new Border
++        {
++            Background = new SolidColorBrush(YearPillBackground),
++            CornerRadius = new CornerRadius(9),
++            Padding = new Thickness(10, 2, 10, 2),
++            HorizontalAlignment = HorizontalAlignment.Center,
++            Child = new TextBlock
++            {
++                Text = group.YearText,
++                FontSize = 11.5,
++                FontWeight = FontWeights.SemiBold,
++                Foreground = new SolidColorBrush(TextSecondary),
++            },
++        });
++
++        var grid = new Grid();
++        for (int i = 0; i < cellsPerRow; i++)
++        {
++            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(CellWidth) });
++        }
++        int rows = (group.Items.Count + cellsPerRow - 1) / cellsPerRow;
++        for (int i = 0; i < rows; i++)
++        {
++            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CellHeight) });
++        }
++        for (int i = 0; i < group.Items.Count; i++)
++        {
++            FrameworkElement cell = BuildHistoryCell(group.Items[i]);
++            Grid.SetRow(cell, i / cellsPerRow);
++            Grid.SetColumn(cell, i % cellsPerRow);
++            grid.Children.Add(cell);
++        }
++        panel.Children.Add(grid);
++        return panel;
++    }
++
++
++    private static FrameworkElement BuildHistoryCell(GachaExportHistoryItem item)
++    {
++        var cell = new Grid { Margin = new Thickness(3, 0, 3, 6) };
++        cell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(92) });
++        cell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
++
++        var frame = new Border
++        {
++            Background = new SolidColorBrush(IconBackground),
++            CornerRadius = new CornerRadius(10),
++        };
++        if (item.Icon is not null)
++        {
++            frame.Child = new Image { Source = item.Icon, Stretch = Stretch.Uniform, Margin = new Thickness(3) };
++        }
++        else
++        {
++            frame.Child = new TextBlock
++            {
++                Text = item.Name,
++                Margin = new Thickness(4),
++                FontSize = 10.5,
++                MaxLines = 3,
++                TextWrapping = TextWrapping.Wrap,
++                TextAlignment = TextAlignment.Center,
++                VerticalAlignment = VerticalAlignment.Center,
++                Foreground = new SolidColorBrush(TextSecondary),
++            };
++        }
++        Grid.SetRow(frame, 0);
++        cell.Children.Add(frame);
++
++        var pity = new Border
++        {
++            Background = new SolidColorBrush(PityColorFor(item.Pity)),
++            CornerRadius = new CornerRadius(7),
++            Padding = new Thickness(5, 0, 5, 1),
++            Margin = new Thickness(3, 3, 0, 0),
++            HorizontalAlignment = HorizontalAlignment.Left,
++            VerticalAlignment = VerticalAlignment.Top,
++            Child = new TextBlock
++            {
++                Text = item.Pity.ToString(),
++                FontSize = 10.5,
++                FontWeight = FontWeights.SemiBold,
++                Foreground = new SolidColorBrush(Colors.White),
++            },
++        };
++        Grid.SetRow(pity, 0);
++        cell.Children.Add(pity);
++
++        // event banners tag UP pulls; off-banner pulls carry no tag at all, the permanent banner none
++        if (item.ShowUpTag && item.IsUp)
++        {
++            var tag = new Border
++            {
++                Background = new SolidColorBrush(UpColor),
++                CornerRadius = new CornerRadius(5),
++                Padding = new Thickness(4, 0, 4, 1),
++                Margin = new Thickness(0, 3, 3, 0),
++                HorizontalAlignment = HorizontalAlignment.Right,
++                VerticalAlignment = VerticalAlignment.Top,
++                Child = new TextBlock
++                {
++                    Text = GachaExportStrings.Current.TagUp,
++                    FontSize = 9.5,
++                    FontWeight = FontWeights.SemiBold,
++                    Foreground = new SolidColorBrush(Colors.White),
++                },
++            };
++            Grid.SetRow(tag, 0);
++            cell.Children.Add(tag);
++        }
++
++        var date = new TextBlock
++        {
++            Text = item.DateText,
++            Margin = new Thickness(0, 3, 0, 0),
++            FontSize = 10.5,
++            HorizontalAlignment = HorizontalAlignment.Center,
++            Foreground = new SolidColorBrush(TextFaint),
++        };
++        Grid.SetRow(date, 1);
++        cell.Children.Add(date);
++
++        return cell;
++    }
++
++}
+diff --git a/src/Starward/Features/GachaOnly/GachaExportCli.cs b/src/Starward/Features/GachaOnly/GachaExportCli.cs
+new file mode 100644
+index 0000000..070bd01
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaExportCli.cs
+@@ -0,0 +1,79 @@
++// GachaOnly fork — command line entry for the headless image export.
++//
++//   Starward.GachaOnly.exe --export-gacha-image <out.png> [--uid <uid>] [--game hk4e|hkrpg|nap]
++//
++// Useful for automation (e.g. a scheduled snapshot of the account), and it is also how the export
++// pipeline can be verified without clicking through the UI.
++//
++// This file is new in the fork; upstream never touches it.
++
++using Starward.Core;
++using System;
++using System.IO;
++using System.Threading.Tasks;
++
++namespace Starward.Features.Gacha;
++
++internal static class GachaExportCli
++{
++
++    private const string Option = "--export-gacha-image";
++
++    private const string UidOption = "--uid";
++
++    private const string GameOption = "--game";
++
++    private const string CountsOption = "--export-gacha-counts";
++
++
++    /// <summary>
++    /// Runs the export when the command line asks for it. Returns false when it is not our command
++    /// (then the caller continues with the normal start-up). The process exits by itself when done.
++    /// </summary>
++    public static async Task<bool> TryRunAsync(string[] args)
++    {
++        if (!GachaOnlyProfile.Enabled || args.Length == 0)
++        {
++            return false;
++        }
++
++        string? outPath = null;
++        long uid = 0;
++        GameBiz? game = null;
++        GachaExportMode mode = GachaExportMode.Records;
++        for (int i = 0; i < args.Length; i++)
++        {
++            if (args[i].Equals(Option, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
++            {
++                outPath = args[++i];
++            }
++            else if (args[i].Equals(CountsOption, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
++            {
++                outPath = args[++i];
++                mode = GachaExportMode.Counts;
++            }
++            else if (args[i].Equals(UidOption, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
++            {
++                _ = long.TryParse(args[++i], out uid);
++            }
++            else if (args[i].Equals(GameOption, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
++            {
++                game = new GameBiz(args[++i]);
++            }
++        }
++
++        if (string.IsNullOrWhiteSpace(outPath))
++        {
++            return false;
++        }
++
++        string path = Path.GetFullPath(outPath);
++        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++        var window = new GachaExportWindow(game ?? AppConfig.CurrentGameBiz, uid, mode);
++        window.SetAutoExport(path);
++        window.Activate();
++        await Task.CompletedTask;
++        return true;
++    }
++
++}
+diff --git a/src/Starward/Features/GachaOnly/GachaExportModels.cs b/src/Starward/Features/GachaOnly/GachaExportModels.cs
+new file mode 100644
+index 0000000..d32bc58
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaExportModels.cs
+@@ -0,0 +1,749 @@
++// GachaOnly fork — data model + metric computation for the "export records as an image" feature.
++//
++// Reuses the existing gacha services: GachaLogService.GetGachaTypeStats(uid) already returns, per
++// banner, the pity/average/UP statistics and the 5★ item list with Icon / Pity / IsUp filled in
++// (the per-game overrides join the item info tables).
++//
++// This file is new in the fork; upstream never touches it.
++
++using Microsoft.UI.Xaml.Media;
++using Microsoft.UI.Xaml.Media.Imaging;
++using Starward.Core;
++using Starward.Helpers;
++using System;
++using System.Collections.Generic;
++using System.Globalization;
++using System.IO;
++using System.Linq;
++using System.Threading;
++using System.Threading.Tasks;
++using Windows.Storage;
++using Windows.Storage.Streams;
++
++namespace Starward.Features.Gacha;
++
++
++internal sealed class GachaExportMetric
++{
++    public string Value { get; init; } = "";
++
++    public string Label { get; init; } = "";
++
++    /// <summary>Draw the value in the accent colour (win rate, averages).</summary>
++    public bool Emphasize { get; init; }
++}
++
++
++internal sealed class GachaExportHistoryItem
++{
++    public ImageSource? Icon { get; set; }
++
++    public string IconUrl { get; init; } = "";
++
++    public string Name { get; init; } = "";
++
++    public int Pity { get; init; }
++
++    public bool IsUp { get; init; }
++
++    /// <summary>Whether UP / off-banner is meaningful for this banner (event banners only).</summary>
++    public bool ShowUpTag { get; init; }
++
++    public int Year { get; init; }
++
++    public string DateText { get; init; } = "";
++}
++
++
++internal sealed class GachaExportHistoryGroup
++{
++    public string YearText { get; init; } = "";
++
++    public List<GachaExportHistoryItem> Items { get; init; } = [];
++}
++
++
++/// <summary>What the exported card shows: the pull records, or the per-item pull counts.</summary>
++internal enum GachaExportMode
++{
++    Records,
++
++    Counts,
++}
++
++
++/// <summary>One counted item in <see cref="GachaExportMode.Counts"/>.</summary>
++internal sealed class GachaExportCountItem
++{
++    public ImageSource? Icon { get; set; }
++
++    public string IconUrl { get; init; } = "";
++
++    public string Name { get; init; } = "";
++
++    public int Count { get; init; }
++
++    public bool IsCharacter { get; init; }
++}
++
++
++internal sealed class GachaExportCountSection
++{
++    public string Title { get; init; } = "";
++
++    public string Note { get; init; } = "";
++
++    public List<GachaExportCountItem> Items { get; init; } = [];
++}
++
++
++internal sealed class GachaExportBannerBlock
++{
++    public string Title { get; init; } = "";
++
++    public string CountText { get; init; } = "";
++
++    public string TimeRangeText { get; init; } = "";
++
++    public string Note { get; init; } = "";
++
++    public List<GachaExportMetric> Metrics { get; init; } = [];
++
++    public List<GachaExportHistoryGroup> History { get; init; } = [];
++}
++
++
++internal sealed class GachaExportModel
++{
++    public string Title { get; init; } = "";
++
++    public string Subtitle { get; init; } = "";
++
++    public string GameIcon { get; init; } = "";
++
++    public string Footer { get; init; } = "";
++
++    public List<GachaExportBannerBlock> Banners { get; init; } = [];
++
++    /// <summary>Only filled in <see cref="GachaExportMode.Counts"/>.</summary>
++    public List<GachaExportCountSection> CountSections { get; init; } = [];
++}
++
++
++/// <summary>
++/// Localised strings for the export card. Kept out of the Starward.Language project on purpose so
++/// the shared resx files stay untouched and keep merging cleanly from upstream.
++/// </summary>
++internal sealed class GachaExportStrings
++{
++
++    public static GachaExportStrings Current { get; } =
++        CultureInfo.CurrentUICulture.TwoLetterISOLanguageName is "zh" ? Chinese : English;
++
++
++    public required string Records { get; init; }
++
++    public required string UidPrefix { get; init; }
++
++    public required string TotalDraws { get; init; }
++
++    public required string Overview { get; init; }
++
++    public required string History5 { get; init; }
++
++    public required string Pity5NotYet { get; init; }
++
++    public required string Average5 { get; init; }
++
++    public required string WinRate { get; init; }
++
++    public required string Worst { get; init; }
++
++    public required string Pity4NotYet { get; init; }
++
++    public required string Average5Up { get; init; }
++
++    public required string CostOfUp { get; init; }
++
++    public required string Best { get; init; }
++
++    public required string DrawUnit { get; init; }
++
++    public required string YearSuffix { get; init; }
++
++    public required string ExportedAt { get; init; }
++
++    public required string CurrencyGenshin { get; init; }
++
++    public required string CurrencyStarRail { get; init; }
++
++    public required string CurrencyZZZ { get; init; }
++
++    public required string SaveAsPng { get; init; }
++
++    public required string CopyImage { get; init; }
++
++    public required string Generating { get; init; }
++
++    public required string NoRecords { get; init; }
++
++    public required string SavedTo { get; init; }
++
++    public required string ExportFailed { get; init; }
++
++    public required string Copied { get; init; }
++
++    public required string ExportAsImage { get; init; }
++
++    public required string HistoryTruncated { get; init; }
++
++    public required string BannerSuffix { get; init; }
++
++    public required string TagUp { get; init; }
++
++    public required string ExportCounts { get; init; }
++
++    public required string CountsRecords { get; init; }
++
++    public required string CountsUnit { get; init; }
++
++    public required string Rarity5 { get; init; }
++
++    public required string Rarity4 { get; init; }
++
++    public required string CountItemsTruncated { get; init; }
++
++
++    private static GachaExportStrings Chinese => new()
++    {
++        Records = "祈愿记录",
++        UidPrefix = "UID",
++        TotalDraws = "共 {0} 抽",
++        Overview = "数据总览",
++        History5 = "五星历史",
++        Pity5NotYet = "未出五星",
++        Average5 = "五星平均",
++        WinRate = "小保底不歪",
++        Worst = "最非",
++        Pity4NotYet = "未出四星",
++        Average5Up = "UP平均",
++        CostOfUp = "UP花费{0}",
++        Best = "最欧",
++        DrawUnit = "抽",
++        YearSuffix = "年",
++        ExportedAt = "导出时间",
++        CurrencyGenshin = "原石",
++        CurrencyStarRail = "星琼",
++        CurrencyZZZ = "菲林",
++        SaveAsPng = "保存为 PNG",
++        CopyImage = "复制到剪贴板",
++        Generating = "正在生成…",
++        NoRecords = "当前账号没有抽卡记录",
++        SavedTo = "已保存到",
++        ExportFailed = "导出失败",
++        Copied = "已复制到剪贴板",
++        ExportAsImage = "导出为图片",
++        HistoryTruncated = "仅显示最近 {0} 个五星记录，{1} 个更早的已省略",
++        BannerSuffix = "个卡池",
++        TagUp = "UP",
++        ExportCounts = "导出统计数量",
++        CountsRecords = "抽卡数量统计",
++        CountsUnit = "次",
++        Rarity5 = "五星",
++        Rarity4 = "四星",
++        CountItemsTruncated = "仅显示前 {0} 项，其余 {1} 项已省略",
++    };
++
++
++    private static GachaExportStrings English => new()
++    {
++        Records = "Wish records",
++        UidPrefix = "UID",
++        TotalDraws = "{0} pulls",
++        Overview = "Overview",
++        History5 = "5★ history",
++        Pity5NotYet = "5★ pity",
++        Average5 = "5★ average",
++        WinRate = "50/50 win rate",
++        Worst = "Worst",
++        Pity4NotYet = "4★ pity",
++        Average5Up = "UP average",
++        CostOfUp = "UP cost ({0})",
++        Best = "Best",
++        DrawUnit = "pulls",
++        YearSuffix = "",
++        ExportedAt = "exported",
++        CurrencyGenshin = "Primogems",
++        CurrencyStarRail = "Stellar Jade",
++        CurrencyZZZ = "Polychrome",
++        SaveAsPng = "Save as PNG",
++        CopyImage = "Copy to clipboard",
++        Generating = "Rendering…",
++        NoRecords = "This account has no gacha records",
++        SavedTo = "saved to",
++        ExportFailed = "export failed",
++        Copied = "copied to clipboard",
++        ExportAsImage = "Export as image",
++        HistoryTruncated = "showing the newest {0} 5★ records, {1} older ones omitted",
++        BannerSuffix = " banners",
++        TagUp = "UP",
++        ExportCounts = "Export count statistics",
++        CountsRecords = "Pull count statistics",
++        CountsUnit = "times",
++        Rarity5 = "5★",
++        Rarity4 = "4★",
++        CountItemsTruncated = "showing the first {0} items, {1} more omitted",
++    };
++
++}
++
++
++internal static class GachaExportModelBuilder
++{
++
++    /// <summary>One pull costs this many primogems / stellar jade / polychrome in all three games.</summary>
++    private const int DrawCost = 160;
++
++    /// <summary>Guard rail: keeps the single-page column render inside the RenderTargetBitmap limit.
++    /// Only reached by very long histories.</summary>
++    private const int MaxHistoryItems = 160;
++
++    /// <summary>Same guard rail for the count export.</summary>
++    private const int MaxCountItems = 240;
++
++
++    /// <summary>Weapon-ish ItemType values across the games and the languages the game data can use.</summary>
++    private static readonly HashSet<string> WeaponItemTypes =
++    [
++        "武器", "光锥", "音擎", "武器", "光円錐", "音動機",
++        "Weapon", "Light Cone", "W-Engine",
++    ];
++
++
++    /// <summary>
++    /// Standard (off-banner) 5★ pools for banners that Starward's GachaNoUp table does not cover.
++    /// Upstream has entries for hk4e301, hkrpg11/12/21/22 and nap2/3 — the Genshin *weapon* banner
++    /// (hk4e302) is missing, so the app cannot tell UP from off-banner there and the export used to
++    /// show no UP data at all for it. The list below is the ten 5★ weapons of the permanent pool;
++    /// it was validated against this account (the weapon banner shows 7 off-banner pulls out of 26,
++    /// i.e. 27% against an expected 25%, and a 73.7% 50/50 win rate).
++    /// Delete this entry if upstream ever adds hk4e302 to GachaNoUp.
++    /// </summary>
++    private static readonly HashSet<string> GenshinStandardWeapons =
++    [
++        "天空之刃", "天空之傲", "天空之翼", "天空之卷", "天空之脊",
++        "狼的末路", "四风原典", "阿莫斯之弓", "和璞鸢", "风鹰剑",
++    ];
++
++    private static readonly Dictionary<string, HashSet<string>> ExtraStandardPools = new()
++    {
++        ["hk4e302"] = GenshinStandardWeapons,
++    };
++
++
++    private static bool TryGetExtraStandardPool(GameBiz biz, int gachaType, out HashSet<string> pool)
++    {
++        return ExtraStandardPools.TryGetValue($"{biz.Game}{gachaType}", out pool!);
++    }
++
++
++    public static string GetGameIcon(GameBiz biz)
++    {
++        return biz.Game switch
++        {
++            GameBiz.hk4e => "ms-appx:///Assets/Image/icon_ys.jpg",
++            GameBiz.hkrpg => "ms-appx:///Assets/Image/icon_sr.jpg",
++            GameBiz.nap => "ms-appx:///Assets/Image/icon_zzz.jpg",
++            _ => "",
++        };
++    }
++
++
++    public static GachaLogService? GetService(GameBiz biz)
++    {
++        return biz.Game switch
++        {
++            GameBiz.hk4e => AppConfig.GetService<GenshinGachaService>(),
++            GameBiz.hkrpg => AppConfig.GetService<StarRailGachaService>(),
++            GameBiz.nap => AppConfig.GetService<ZZZGachaService>(),
++            _ => null,
++        };
++    }
++
++
++    public static string GetGameName(GameBiz biz)
++    {
++        return biz.Game switch
++        {
++            GameBiz.hk4e => "原神 / Genshin Impact",
++            GameBiz.hkrpg => "崩坏：星穹铁道 / Honkai: Star Rail",
++            GameBiz.nap => "绝区零 / Zenless Zone Zero",
++            _ => biz.Value,
++        };
++    }
++
++
++    public static long GetLastUid(GameBiz biz)
++    {
++        return AppConfig.GetLastUidInGachaLogPage(biz.Game);
++    }
++
++
++    public static async Task<GachaExportModel?> BuildAsync(GameBiz biz, long uid, CancellationToken cancellationToken = default)
++    {
++        GachaLogService? service = GetService(biz);
++        if (service is null || uid <= 0)
++        {
++            return null;
++        }
++        var (stats, _) = await Task.Run(() => service.GetGachaTypeStats(uid), cancellationToken);
++        GachaExportStrings s = GachaExportStrings.Current;
++
++        var banners = new List<(int Count, bool SupportsUp, GachaExportBannerBlock Block)>();
++        foreach (GachaTypeStats stat in stats)
++        {
++            if (stat.Count <= 0)
++            {
++                continue;
++            }
++            List<GachaLogItemEx> five = stat.List_5.Where(x => x.ItemId > 0).ToList();
++            string note = five.Count > MaxHistoryItems
++                ? string.Format(s.HistoryTruncated, MaxHistoryItems, five.Count - MaxHistoryItems)
++                : "";
++            // the app flags UP/off-banner itself whenever GachaNoUp knows the banner; for the Genshin
++            // weapon banner (and any future gap) fall back to our own standard pool
++            bool appKnowsUp = five.Exists(x => x.HasUpItem);
++            HashSet<string>? standardPool = null;
++            bool deriveUp = !appKnowsUp && TryGetExtraStandardPool(biz, stat.GachaType, out standardPool);
++            bool supportsUp = appKnowsUp || deriveUp;
++            bool IsUp(GachaLogItemEx item)
++            {
++                if (appKnowsUp)
++                {
++                    return item.IsUp;
++                }
++                return deriveUp && standardPool is not null && !standardPool.Contains(item.Name);
++            }
++
++            banners.Add((stat.Count, supportsUp, new GachaExportBannerBlock
++            {
++                Title = stat.GachaTypeText,
++                CountText = string.Format(s.TotalDraws, stat.Count),
++                TimeRangeText = $"{stat.StartTime:yyyy-MM-dd} ~ {stat.EndTime:yyyy-MM-dd}",
++                Note = note,
++                Metrics = BuildMetrics(biz, stat, five, s, supportsUp, IsUp),
++                History = BuildHistory(five, s, supportsUp, IsUp),
++            }));
++        }
++
++        if (banners.Count == 0)
++        {
++            return null;
++        }
++
++        // event banners first (most pulls first), the permanent banner last — for Genshin that reads
++        // 角色池 / 武器池 / 常驻池, for Star Rail 角色/光锥/联动 … / 群星跃迁. A banner only counts as
++        // an event banner when UP/off-banner is meaningful for it (see the UP resolution above), which
++        // is exactly how the permanent banner is told apart without hardcoding type ids.
++        List<GachaExportBannerBlock> ordered = banners
++            .OrderBy(x => x.SupportsUp ? 0 : 1)
++            .ThenByDescending(x => x.Count)
++            .Select(x => x.Block)
++            .ToList();
++        var model = new GachaExportModel
++        {
++            Title = $"{GetGameName(biz)} · {s.Records}",
++            Subtitle = $"{s.UidPrefix} {uid} · {banners.Min(x => x.Block.TimeRangeText[..10])} ~ {banners.Max(x => x.Block.TimeRangeText[^10..])} · "
++                       + string.Format(s.TotalDraws, banners.Sum(x => x.Count)) + $" · {banners.Count}{s.BannerSuffix}",
++            GameIcon = GetGameIcon(biz),
++            Footer = $"Starward Gacha · {s.ExportedAt} {DateTime.Now:yyyy-MM-dd HH:mm} · github.com/Scighost/Starward",
++            Banners = ordered,
++        };
++
++        await LoadIconsAsync(model, cancellationToken);
++        return model;
++    }
++
++
++    public static async Task<GachaExportModel?> BuildCountsAsync(GameBiz biz, long uid, CancellationToken cancellationToken = default)
++    {
++        GachaLogService? service = GetService(biz);
++        if (service is null || uid <= 0)
++        {
++            return null;
++        }
++        var (stats, itemStats) = await Task.Run(() => service.GetGachaTypeStats(uid), cancellationToken);
++        GachaExportStrings s = GachaExportStrings.Current;
++
++        var sections = new List<GachaExportCountSection>();
++        foreach (IGrouping<int, GachaLogItemEx> group in itemStats
++                     .Where(x => x.ItemId > 0 && x.RankType >= 4)
++                     .GroupBy(x => x.RankType)
++                     .OrderByDescending(x => x.Key))
++        {
++            // count first, then characters before weapons on a tie, then by name
++            List<GachaLogItemEx> ordered = group
++                .OrderByDescending(x => x.ItemCount)
++                .ThenBy(x => IsCharacterItem(x.ItemType) ? 0 : 1)
++                .ThenBy(x => x.Name, StringComparer.CurrentCulture)
++                .ToList();
++            string note = ordered.Count > MaxCountItems
++                ? string.Format(s.CountItemsTruncated, MaxCountItems, ordered.Count - MaxCountItems)
++                : "";
++            sections.Add(new GachaExportCountSection
++            {
++                Title = $"{(group.Key == 5 ? s.Rarity5 : s.Rarity4)} · {ordered.Count}",
++                Note = note,
++                Items = ordered.Take(MaxCountItems).Select(x => new GachaExportCountItem
++                {
++                    Name = x.Name,
++                    IconUrl = x.Icon,
++                    Count = x.ItemCount,
++                    IsCharacter = IsCharacterItem(x.ItemType),
++                }).ToList(),
++            });
++        }
++
++        if (sections.Count == 0)
++        {
++            return null;
++        }
++
++        var model = new GachaExportModel
++        {
++            Title = $"{GetGameName(biz)} · {s.CountsRecords}",
++            Subtitle = $"{s.UidPrefix} {uid} · {string.Format(s.TotalDraws, stats.Where(x => x.Count > 0).Sum(x => x.Count))} · "
++                       + string.Join(" / ", sections.Select(x => x.Title)),
++            GameIcon = GetGameIcon(biz),
++            Footer = $"Starward Gacha · {s.ExportedAt} {DateTime.Now:yyyy-MM-dd HH:mm} · github.com/Scighost/Starward",
++            CountSections = sections,
++        };
++
++        await LoadIconsAsync(model, cancellationToken);
++        return model;
++    }
++
++
++    /// <summary>
++    /// ItemType comes from the game's own data and is localised, so the weapon kinds are matched by
++    /// name (a character is anything that is not one of them; an unknown type therefore counts as a
++    /// character, which is the safer default for the "characters first" ordering).
++    /// </summary>
++    private static bool IsCharacterItem(string? itemType)
++    {
++        return string.IsNullOrWhiteSpace(itemType) || !WeaponItemTypes.Contains(itemType);
++    }
++
++
++    private static List<GachaExportMetric> BuildMetrics(GameBiz biz, GachaTypeStats stat, List<GachaLogItemEx> five, GachaExportStrings s,
++                                                        bool supportsUp, Func<GachaLogItemEx, bool> isUp)
++    {
++        // order by the game's own record id: imported archives often share the same minute-precision
++        // timestamp, so ordering by Time would scramble the sequence and skew the guarantee tracking
++        List<GachaLogItemEx> chronological = five.OrderBy(x => x.Id).ToList();
++        int worst = chronological.Count > 0 ? chronological.Max(x => x.Pity) : 0;
++        int best = chronological.Count > 0 ? chronological.Min(x => x.Pity) : 0;
++        List<GachaLogItemEx> ups = chronological.Where(isUp).ToList();
++        (int coinFlips, int coinWins) = CountCoinFlips(chronological, isUp);
++        // the game's own average covers banners the app understands; otherwise compute it ourselves
++        double average5Up = stat.Count_5_Up > 0 ? stat.Average_5_Up : (ups.Count > 0 ? ups.Average(x => x.Pity) : 0);
++        Serilog.Log.Information("[GachaExport] {Title}: five={Five} up={Up} flips={Flips} wins={Wins} avgUp={AvgUp:F1} supportsUp={SupportsUp} types={Types}",
++                                stat.GachaTypeText, chronological.Count, ups.Count, coinFlips, coinWins, average5Up, supportsUp,
++                                string.Join(',', chronological.GroupBy(x => x.GachaType).Select(g => $"{g.Key}:{g.Count()}")));
++
++        var metrics = new List<GachaExportMetric>
++        {
++            new() { Value = $"{stat.Pity_5}{s.DrawUnit}", Label = s.Pity5NotYet },
++            new() { Value = $"{stat.Average_5:F1}{s.DrawUnit}", Label = s.Average5, Emphasize = true },
++        };
++        if (supportsUp && coinFlips > 0)
++        {
++            metrics.Add(new GachaExportMetric { Value = $"{(double)coinWins / coinFlips:P1}", Label = s.WinRate, Emphasize = true });
++        }
++        metrics.Add(new GachaExportMetric { Value = $"{worst}{s.DrawUnit}", Label = s.Worst });
++        metrics.Add(new GachaExportMetric { Value = $"{stat.Pity_4}{s.DrawUnit}", Label = s.Pity4NotYet });
++        if (supportsUp && ups.Count > 0)
++        {
++            string currency = biz.Game switch
++            {
++                GameBiz.hk4e => s.CurrencyGenshin,
++                GameBiz.hkrpg => s.CurrencyStarRail,
++                GameBiz.nap => s.CurrencyZZZ,
++                _ => "",
++            };
++            metrics.Add(new GachaExportMetric { Value = $"{average5Up:F1}{s.DrawUnit}", Label = s.Average5Up, Emphasize = true });
++            metrics.Add(new GachaExportMetric { Value = FormatCost(average5Up * DrawCost), Label = string.Format(s.CostOfUp, currency) });
++        }
++        metrics.Add(new GachaExportMetric { Value = $"{best}{s.DrawUnit}", Label = s.Best });
++        return metrics;
++    }
++
++
++    /// <summary>
++    /// 50/50 bookkeeping over the banner's 5★ sequence: after a non-UP 5★ the next one is the
++    /// guaranteed one, so it is not a coin flip. Matches how the community tools present
++    /// "小保底不歪" for a banner block.
++    /// </summary>
++    private static (int Flips, int Wins) CountCoinFlips(List<GachaLogItemEx> chronological, Func<GachaLogItemEx, bool> isUp)
++    {
++        int flips = 0, wins = 0;
++        bool first = true;
++        bool previousWasUp = false;
++        foreach (GachaLogItemEx item in chronological)
++        {
++            // a coin flip is a 5★ pulled right after an UP 5★ (or the first recorded one); the 5★
++            // following a non-UP one is guaranteed, so it must not be counted
++            if (first || previousWasUp)
++            {
++                flips++;
++                if (isUp(item))
++                {
++                    wins++;
++                }
++            }
++            first = false;
++            previousWasUp = isUp(item);
++        }
++        return (flips, wins);
++    }
++
++
++    private static string FormatCost(double value)
++    {
++        if (value >= 10000)
++        {
++            return $"{value / 10000:F2}w";
++        }
++        return $"{value:F0}";
++    }
++
++
++    private static List<GachaExportHistoryGroup> BuildHistory(List<GachaLogItemEx> five, GachaExportStrings s,
++                                                             bool supportsUp, Func<GachaLogItemEx, bool> isUp)
++    {
++        return five.OrderByDescending(x => x.Id)
++                   .Take(MaxHistoryItems)
++                   .GroupBy(x => x.Time.Year)
++                   .Select(g => new GachaExportHistoryGroup
++                   {
++                       YearText = $"{g.Key}{s.YearSuffix}",
++                       Items = g.Select(x => new GachaExportHistoryItem
++                       {
++                           Name = x.Name,
++                           IconUrl = x.Icon,
++                           Pity = x.Pity,
++                           IsUp = isUp(x),
++                           ShowUpTag = supportsUp,
++                           Year = x.Time.Year,
++                           DateText = x.Time.ToString("MM-dd"),
++                       }).ToList(),
++                   })
++                   .ToList();
++    }
++
++
++    private static async Task LoadIconsAsync(GachaExportModel model, CancellationToken cancellationToken)
++    {
++        List<GachaExportHistoryItem> historyItems = [.. model.Banners.SelectMany(x => x.History).SelectMany(x => x.Items)];
++        List<GachaExportCountItem> countItems = [.. model.CountSections.SelectMany(x => x.Items)];
++        List<string> urls = [.. historyItems.Select(x => x.IconUrl)
++                                           .Concat(countItems.Select(x => x.IconUrl))
++                                           .Where(x => !string.IsNullOrWhiteSpace(x))
++                                           .Distinct()];
++        if (urls.Count == 0)
++        {
++            return;
++        }
++        var index = new Dictionary<string, int>();
++        for (int i = 0; i < urls.Count; i++)
++        {
++            index[urls[i]] = i;
++        }
++
++        // 1) download (or hit) the image cache on background threads
++        string?[] files = new string?[urls.Count];
++        await Parallel.ForEachAsync(Enumerable.Range(0, urls.Count),
++            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = cancellationToken },
++            async (i, token) =>
++            {
++                try
++                {
++                    files[i] = await FileCache.GetFromCacheAsync(new Uri(urls[i], UriKind.Absolute), false, token);
++                }
++                catch (Exception)
++                {
++                    files[i] = null;
++                }
++            });
++
++        // 2) decode them on the UI thread — BitmapImage is a XAML object and cannot be created
++        //    on a thread pool thread
++        var images = new ImageSource?[urls.Count];
++        for (int i = 0; i < urls.Count; i++)
++        {
++            if (!string.IsNullOrWhiteSpace(files[i]))
++            {
++                images[i] = await DecodeIconAsync(files[i]!, cancellationToken);
++            }
++        }
++
++        foreach (GachaExportHistoryItem item in historyItems)
++        {
++            if (index.TryGetValue(item.IconUrl, out int i))
++            {
++                item.Icon = images[i];
++            }
++        }
++        foreach (GachaExportCountItem item in countItems)
++        {
++            if (index.TryGetValue(item.IconUrl, out int i))
++            {
++                item.Icon = images[i];
++            }
++        }
++    }
++
++
++    private static async Task<ImageSource?> DecodeIconAsync(string path, CancellationToken cancellationToken)
++    {
++        try
++        {
++            StorageFile file = await StorageFile.GetFileFromPathAsync(path);
++            var bitmap = new BitmapImage();
++            using IRandomAccessStream stream = await file.OpenReadAsync();
++            await bitmap.SetSourceAsync(stream);
++            return bitmap;
++        }
++        catch (Exception)
++        {
++            return null;
++        }
++    }
++
++
++    /// <summary>Loads one icon from the Starward image cache (downloads once, then offline).</summary>
++    public static async Task<ImageSource?> LoadIconAsync(string? url, CancellationToken cancellationToken = default)
++    {
++        if (string.IsNullOrWhiteSpace(url))
++        {
++            return null;
++        }
++        try
++        {
++            var uri = new Uri(url, UriKind.Absolute);
++            string? file = await FileCache.GetFromCacheAsync(uri, false, cancellationToken);
++            if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
++            {
++                return null;
++            }
++            return await DecodeIconAsync(file, cancellationToken);
++        }
++        catch (Exception)
++        {
++            return null;
++        }
++    }
++
++}
++
++
+diff --git a/src/Starward/Features/GachaOnly/GachaExportWindow.xaml b/src/Starward/Features/GachaOnly/GachaExportWindow.xaml
+new file mode 100644
+index 0000000..7af5f01
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaExportWindow.xaml
+@@ -0,0 +1,60 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<!--  GachaOnly fork: preview + export window for the "records as image" feature.  -->
++<sf:WindowEx x:Class="Starward.Features.Gacha.GachaExportWindow"
++             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
++             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
++             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
++             xmlns:local="using:Starward.Features.Gacha"
++             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
++             xmlns:sf="using:Starward.Frameworks"
++             mc:Ignorable="d">
++
++    <Grid x:Name="Grid_Root"
++          Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
++          Loaded="Grid_Root_Loaded">
++
++        <Grid.RowDefinitions>
++            <RowDefinition Height="Auto" />
++            <RowDefinition Height="*" />
++        </Grid.RowDefinitions>
++
++        <Grid Padding="16,12,16,12">
++            <Grid.ColumnDefinitions>
++                <ColumnDefinition Width="*" />
++                <ColumnDefinition Width="Auto" />
++            </Grid.ColumnDefinitions>
++            <TextBlock x:Name="TextBlock_Header"
++                       VerticalAlignment="Center"
++                       FontSize="16"
++                       FontWeight="SemiBold"
++                       TextTrimming="CharacterEllipsis" />
++            <StackPanel Grid.Column="1"
++                        Orientation="Horizontal"
++                        Spacing="10">
++                <ProgressRing x:Name="ProgressRing_Busy"
++                              Width="18"
++                              Height="18"
++                              IsActive="True" />
++                <TextBlock x:Name="TextBlock_Status"
++                           VerticalAlignment="Center"
++                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
++                <Button x:Name="Button_Save"
++                        Click="Button_Save_Click" />
++                <Button x:Name="Button_Copy"
++                        Click="Button_Copy_Click" />
++            </StackPanel>
++        </Grid>
++
++        <ScrollViewer x:Name="ScrollViewer_Card"
++                      Grid.Row="1"
++                      Padding="0,0,0,16"
++                      HorizontalScrollMode="Enabled"
++                      HorizontalScrollBarVisibility="Auto">
++            <local:GachaExportCard x:Name="Card"
++                                   Margin="16,0,16,0"
++                                   HorizontalAlignment="Left" />
++        </ScrollViewer>
++
++    </Grid>
++
++</sf:WindowEx>
+diff --git a/src/Starward/Features/GachaOnly/GachaExportWindow.xaml.cs b/src/Starward/Features/GachaOnly/GachaExportWindow.xaml.cs
+new file mode 100644
+index 0000000..bafeccb
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaExportWindow.xaml.cs
+@@ -0,0 +1,263 @@
++// GachaOnly fork — preview + PNG export window for the current game / current account.
++//
++// The card is rendered with RenderTargetBitmap at 2x so text and icons stay crisp. Because a
++// ScrollViewer clips its content, the window is temporarily enlarged to the full card size before
++// rendering (otherwise a tall card would be cut off at the viewport edge).
++//
++// This file is new in the fork; upstream never touches it.
++
++using Microsoft.Extensions.Logging;
++using Microsoft.UI.Xaml;
++using Microsoft.UI.Xaml.Media.Imaging;
++using Starward.Core;
++using Starward.Frameworks;
++using Starward.Helpers;
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Threading.Tasks;
++using Windows.ApplicationModel.DataTransfer;
++using Windows.Graphics;
++using Windows.Graphics.Imaging;
++using Windows.Storage;
++using Windows.Storage.Streams;
++using Windows.System;
++
++namespace Starward.Features.Gacha;
++
++public sealed partial class GachaExportWindow : WindowEx
++{
++
++    private const double RenderScale = 2.0;
++
++    /// <summary>RenderTargetBitmap refuses to render anything larger than this in one dimension.</summary>
++    private const double MaxRenderPixels = 4000;
++
++
++    private readonly ILogger<GachaExportWindow> _logger = AppConfig.GetLogger<GachaExportWindow>();
++
++    private readonly GameBiz _biz;
++
++    private long _uid;
++
++    private GachaExportModel? _model;
++
++    private readonly GachaExportMode _mode;
++
++
++    internal GachaExportWindow(GameBiz biz, long uid, GachaExportMode mode = GachaExportMode.Records)
++    {
++        this.InitializeComponent();
++        _biz = biz;
++        _mode = mode;
++        _uid = uid > 0 ? uid : GachaExportModelBuilder.GetLastUid(biz);
++        GachaExportStrings s = GachaExportStrings.Current;
++        string what = mode == GachaExportMode.Counts ? s.CountsRecords : s.Records;
++        Title = $"{GachaExportModelBuilder.GetGameName(biz)} · {what}";
++        Button_Save.Content = s.SaveAsPng;
++        Button_Copy.Content = s.CopyImage;
++        TextBlock_Status.Text = s.Generating;
++        CenterInScreen(1240, 900);
++    }
++
++
++    /// <summary>Current game, or null when the caller did not resolve one yet.</summary>
++    public GameBiz GameBiz => _biz;
++
++
++    public long Uid => _uid;
++
++
++    private async void Grid_Root_Loaded(object sender, RoutedEventArgs e)
++    {
++        try
++        {
++            GachaExportStrings s = GachaExportStrings.Current;
++            _model = _mode == GachaExportMode.Counts
++                ? await GachaExportModelBuilder.BuildCountsAsync(_biz, _uid)
++                : await GachaExportModelBuilder.BuildAsync(_biz, _uid);
++            if (_model is null)
++            {
++                TextBlock_Status.Text = s.NoRecords;
++                if (_autoExportPath is not null)
++                {
++                    _logger.LogError("No gacha records to export for {Biz} uid {Uid}", _biz.Value, _uid);
++                    Environment.Exit(1);
++                }
++                return;
++            }
++            Card.SetModel(_model);
++            TextBlock_Header.Text = _model.Title;
++            await Task.Delay(250); // let the images and the layout settle
++            ProgressRing_Busy.IsActive = false;
++            ProgressRing_Busy.Visibility = Visibility.Collapsed;
++            TextBlock_Status.Text = _model.Subtitle;
++            Button_Save.IsEnabled = true;
++            Button_Copy.IsEnabled = true;
++            if (_autoExportPath is not null)
++            {
++                await ExportAndExitAsync();
++            }
++        }
++        catch (Exception ex)
++        {
++            _logger.LogError(ex, "Build gacha export model");
++            ProgressRing_Busy.IsActive = false;
++            TextBlock_Status.Text = ex.Message;
++        }
++    }
++
++
++    private async Task ExportAndExitAsync()
++    {
++        bool ok = await ExportToFileAsync(_autoExportPath!);
++        Environment.Exit(ok ? 0 : 1);
++    }
++
++
++    private string? _autoExportPath;
++
++
++    /// <summary>Set by the command line export path; when set the window exports and exits by itself.</summary>
++    public void SetAutoExport(string path)
++    {
++        _autoExportPath = path;
++        Button_Save.IsEnabled = true;
++        Button_Copy.IsEnabled = true;
++    }
++
++
++    private async void Button_Save_Click(object sender, RoutedEventArgs e)
++    {
++        try
++        {
++            if (_model is null)
++            {
++                return;
++            }
++            GachaExportStrings s = GachaExportStrings.Current;
++            string suggestName = _mode == GachaExportMode.Counts
++                ? $"Starward_GachaCount_{_biz.Game}_{_uid}_{DateTime.Now:yyyyMMddHHmmss}.png"
++                : $"Starward_Gacha_{_biz.Game}_{_uid}_{DateTime.Now:yyyyMMddHHmmss}.png";
++            string? path = await FileDialogHelper.OpenSaveFileDialogAsync(Content.XamlRoot, suggestName, ("PNG", ".png"));
++            if (string.IsNullOrWhiteSpace(path))
++            {
++                return;
++            }
++            TextBlock_Status.Text = s.Generating;
++            if (await ExportToFileAsync(path))
++            {
++                TextBlock_Status.Text = s.SavedTo + " " + path;
++                StorageFile storageFile = await StorageFile.GetFileFromPathAsync(path);
++                var options = new FolderLauncherOptions();
++                options.ItemsToSelect.Add(storageFile);
++                await Launcher.LaunchFolderAsync(await storageFile.GetParentAsync(), options);
++            }
++            else
++            {
++                TextBlock_Status.Text = s.ExportFailed;
++            }
++        }
++        catch (Exception ex)
++        {
++            _logger.LogError(ex, "Save gacha image");
++            TextBlock_Status.Text = ex.Message;
++        }
++    }
++
++
++    private async void Button_Copy_Click(object sender, RoutedEventArgs e)
++    {
++        try
++        {
++            if (_model is null)
++            {
++                return;
++            }
++            string file = Path.Combine(Path.GetTempPath(), $"Starward_Gacha_{_biz.Game}_{_uid}.png");
++            if (await ExportToFileAsync(file))
++            {
++                StorageFile storageFile = await StorageFile.GetFileFromPathAsync(file);
++                ClipboardHelper.SetStorageItems(DataPackageOperation.Copy, new[] { storageFile });
++                TextBlock_Status.Text = GachaExportStrings.Current.Copied;
++            }
++        }
++        catch (Exception ex)
++        {
++            _logger.LogError(ex, "Copy gacha image");
++            TextBlock_Status.Text = ex.Message;
++        }
++    }
++
++
++    /// <summary>
++    /// Renders the card in one pass and writes it as a PNG file.
++    /// RenderTargetBitmap is capped at 4096 px per dimension, so if the card is taller than that the
++    /// whole card is scaled down just enough to fit — the layout is column based, which keeps that
++    /// from happening for normal record sets, and unlike page stitching it never leaves a seam.
++    /// Also used by the command line export.
++    /// </summary>
++    public async Task<bool> ExportToFileAsync(string path)
++    {
++        try
++        {
++            if (_model is null)
++            {
++                return false;
++            }
++
++            Card.SetModel(_model);
++            Card.UpdateLayout();
++            await Task.Delay(220); // let the icons and the layout settle
++            _logger.LogInformation("[GachaExport] {Layout}", Card.DescribeLayout());
++
++            double cardWidth = Card.CardWidth;
++            double cardHeight = Card.ActualHeight;
++            if (cardWidth < 10 || cardHeight < 10)
++            {
++                return false;
++            }
++            double scale = Math.Clamp(MaxRenderPixels / cardHeight, 0.5, RenderScale);
++
++            var bitmap = new RenderTargetBitmap();
++            await bitmap.RenderAsync(Card, (int)Math.Round(cardWidth * scale), (int)Math.Round(cardHeight * scale));
++            byte[] pixels = await ReadPixelsAsync(bitmap);
++
++            string? folder = Path.GetDirectoryName(path);
++            if (!string.IsNullOrWhiteSpace(folder))
++            {
++                Directory.CreateDirectory(folder);
++            }
++            // a plain FileStream works for the save picker (file already created) and for the
++            // command line export (file does not exist yet)
++            using (var fileStream = new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
++            using (IRandomAccessStream stream = fileStream.AsRandomAccessStream())
++            {
++                BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
++                encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
++                                     (uint)bitmap.PixelWidth, (uint)bitmap.PixelHeight, 96, 96, pixels);
++                await encoder.FlushAsync();
++            }
++            _logger.LogInformation("Gacha image exported to {Path} ({Width}x{Height}, layout {CardW}x{CardH}, scale {Scale:F2})",
++                                   path, bitmap.PixelWidth, bitmap.PixelHeight, cardWidth, cardHeight, scale);
++            return true;
++        }
++        catch (Exception ex)
++        {
++            _logger.LogError(ex, "Export gacha image to {Path}", path);
++            return false;
++        }
++    }
++
++
++    private static async Task<byte[]> ReadPixelsAsync(RenderTargetBitmap bitmap)
++    {
++        IBuffer buffer = await bitmap.GetPixelsAsync();
++        byte[] pixels = new byte[buffer.Length];
++        using var reader = DataReader.FromBuffer(buffer);
++        reader.ReadBytes(pixels);
++        return pixels;
++    }
++
++}
+diff --git a/src/Starward/Features/GachaOnly/GachaOnlyDataFolder.cs b/src/Starward/Features/GachaOnly/GachaOnlyDataFolder.cs
+new file mode 100644
+index 0000000..ade9613
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaOnlyDataFolder.cs
+@@ -0,0 +1,291 @@
++// GachaOnly fork — resolves the user data folder that holds StarwardDatabase.db.
++//
++// Requirement for this fork: the standalone gacha app must reuse the data folder of the user's
++// existing Starward install ("共用同一个数据目录"), so gacha records, UIGF archives and the
++// cached gacha URLs are shared with it instead of being duplicated.
++//
++// Resolution order (first hit wins):
++//   1. command line :  --data-folder <path>   or  --data-folder=<path>
++//   2. environment  :  STARWARD_GACHA_DATA_FOLDER
++//   3. gacha-data.ini next to the executable, key UserDataFolder=<path>
++//   4. auto probe   : known Starward-family folders on this machine (see ProbeCandidates)
++//   5. null         : fall back to upstream Starward resolution (registry / portable config.ini /
++//                     first-run welcome dialog)
++//
++// Everything is validated: a candidate that does not exist (or, for the auto probe, has no
++// database) is skipped, so a stale ini file can never leave the app without a database.
++//
++// This file is new in the fork; upstream never touches it.
++
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++using System.IO;
++using System.Linq;
++
++namespace Starward.Features.Gacha;
++
++internal static class GachaOnlyDataFolder
++{
++
++    /// <summary>Config file next to the executable. Key name matches upstream's portable config.ini.</summary>
++    public const string ConfigFileName = "gacha-data.ini";
++
++    public const string EnvironmentVariable = "STARWARD_GACHA_DATA_FOLDER";
++
++    public const string UserDataFolderKey = "UserDataFolder";
++
++    public const string CommandLineOption = "--data-folder";
++
++    public const string DatabaseFileName = "StarwardDatabase.db";
++
++
++    private const string LogFileName = "GachaOnly-data-folder.log";
++
++
++    private static bool _resolved;
++
++    private static string? _folder;
++
++
++    /// <summary>The folder that was accepted this run, or null when upstream resolution is used.</summary>
++    public static string? ResolvedFolder => _folder;
++
++
++    /// <summary>Where the accepted folder came from, for the breadcrumb log.</summary>
++    public static string? ResolvedFrom { get; private set; }
++
++
++    /// <summary>
++    /// Returns the shared data folder, or null when the fork does not apply / nothing was configured.
++    /// Called once per process from <c>AppConfig.CheckEnviromentAsync</c>.
++    /// </summary>
++    public static string? Resolve()
++    {
++        if (!GachaOnlyProfile.Enabled)
++        {
++            return null;
++        }
++        if (_resolved)
++        {
++            return _folder;
++        }
++        _resolved = true;
++
++        var tried = new List<string>();
++        foreach ((string? candidate, string source) in Sources())
++        {
++            if (string.IsNullOrWhiteSpace(candidate))
++            {
++                continue;
++            }
++            string path = Normalize(candidate);
++            tried.Add($"{source} => {path}");
++            if (!Directory.Exists(path))
++            {
++                continue;
++            }
++            if (!File.Exists(Path.Combine(path, DatabaseFileName)) && source.StartsWith("probe", StringComparison.Ordinal))
++            {
++                // An explicitly configured folder may legitimately be brand new (upstream creates the
++                // database on first use), but a probe result without a database is useless.
++                continue;
++            }
++            _folder = path;
++            ResolvedFrom = source;
++            WriteBreadcrumb(tried, path, source);
++            return path;
++        }
++
++        WriteBreadcrumb(tried, null, null);
++        return null;
++    }
++
++
++    private static IEnumerable<(string? Candidate, string Source)> Sources()
++    {
++        string[] args = Environment.GetCommandLineArgs();
++        for (int i = 0; i < args.Length; i++)
++        {
++            string arg = args[i];
++            if (arg.StartsWith(CommandLineOption + "=", StringComparison.OrdinalIgnoreCase))
++            {
++                yield return (arg[(CommandLineOption.Length + 1)..], "command line");
++            }
++            else if (arg.Equals(CommandLineOption, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
++            {
++                yield return (args[i + 1], "command line");
++            }
++        }
++
++        yield return (Environment.GetEnvironmentVariable(EnvironmentVariable), "environment");
++
++        yield return (ReadConfigFile(), "config file " + ConfigFileName);
++
++        foreach (string candidate in ProbeCandidates())
++        {
++            yield return (candidate, "probe");
++        }
++    }
++
++
++    /// <summary>Known Starward-family user data folders, most likely first.</summary>
++    private static IEnumerable<string> ProbeCandidates()
++    {
++        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
++
++        // upstream default location (holds a database only for non-portable installs)
++        yield return Path.Combine(localAppData, "Starward");
++
++        // portable installs: <drive>:\Mihoyo\Starward is where the official portable build lives
++        foreach (string drive in FixedDrives())
++        {
++            yield return Path.Combine(drive, "Mihoyo", "Starward");
++        }
++
++        // the data folder used by the previous standalone gacha build (MihoyoWishBook)
++        yield return Path.Combine(localAppData, "MihoyoWishBook");
++
++        foreach (string drive in FixedDrives())
++        {
++            yield return Path.Combine(drive, "Starward");
++        }
++
++        // next to the executable (portable-in-place)
++        yield return AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
++    }
++
++
++    private static IEnumerable<string> FixedDrives()
++    {
++        DriveInfo[] drives;
++        try
++        {
++            drives = DriveInfo.GetDrives();
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"GachaOnlyDataFolder: enumerate drives failed: {ex.Message}");
++            yield break;
++        }
++        foreach (DriveInfo drive in drives)
++        {
++            if (drive.DriveType == DriveType.Fixed && drive.IsReady)
++            {
++                yield return drive.RootDirectory.FullName;
++            }
++        }
++    }
++
++
++    private static string? ReadConfigFile()
++    {
++        foreach (string file in ConfigFileCandidates())
++        {
++            string? value = ReadConfigValue(file);
++            if (value is not null)
++            {
++                return value;
++            }
++        }
++        return null;
++    }
++
++
++    /// <summary>
++    /// Where the config file may live. Besides the folder next to the executable this checks the
++    /// package root, because in the portable layout the launcher sits in the package root while the
++    /// app runs from <c>app-&lt;version&gt;\</c>, and the config belongs next to the launcher.
++    /// </summary>
++    private static IEnumerable<string> ConfigFileCandidates()
++    {
++        string baseFolder = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
++        yield return Path.Combine(baseFolder, ConfigFileName);
++
++        var directory = new DirectoryInfo(baseFolder);
++        if (directory.Name.StartsWith("app-", StringComparison.OrdinalIgnoreCase) && directory.Parent is not null)
++        {
++            yield return Path.Combine(directory.Parent.FullName, ConfigFileName);
++        }
++    }
++
++
++    private static string? ReadConfigValue(string file)
++    {
++        try
++        {
++            if (!File.Exists(file))
++            {
++                return null;
++            }
++            foreach (string raw in File.ReadAllLines(file))
++            {
++                string line = raw.Trim();
++                if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#'))
++                {
++                    continue;
++                }
++                int index = line.IndexOf('=');
++                if (index <= 0)
++                {
++                    continue;
++                }
++                if (line[..index].Trim().Equals(UserDataFolderKey, StringComparison.OrdinalIgnoreCase))
++                {
++                    return line[(index + 1)..].Trim().Trim('"').Trim();
++                }
++            }
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"GachaOnlyDataFolder: read {ConfigFileName} failed: {ex.Message}");
++        }
++        return null;
++    }
++
++
++    /// <summary>Expands environment variables, strips quotes and makes the path absolute.</summary>
++    private static string Normalize(string path)
++    {
++        path = Environment.ExpandEnvironmentVariables(path.Trim().Trim('"').Trim());
++        try
++        {
++            return Path.GetFullPath(path);
++        }
++        catch (Exception)
++        {
++            return path;
++        }
++    }
++
++
++    /// <summary>
++    /// Breadcrumb in the (shared) log folder: which folder the app attached to, and which
++    /// candidates were rejected. Purely diagnostic, keeps support questions answerable.
++    /// </summary>
++    private static void WriteBreadcrumb(List<string> tried, string? accepted, string? source)
++    {
++        try
++        {
++            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Starward", "log");
++            Directory.CreateDirectory(folder);
++            string file = Path.Combine(folder, LogFileName);
++            var info = new FileInfo(file);
++            if (info.Exists && info.Length > 64 * 1024)
++            {
++                File.Delete(file);
++            }
++            var lines = new List<string>
++            {
++                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {(accepted is null ? "no shared folder resolved, upstream resolution is used" : $"data folder = {accepted}  (from {source})")}",
++            };
++            lines.AddRange(tried.Select(x => "    tried " + x));
++            File.AppendAllLines(file, lines);
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"GachaOnlyDataFolder: breadcrumb failed: {ex.Message}");
++        }
++    }
++
++}
+diff --git a/src/Starward/Features/GachaOnly/GachaOnlyProfile.cs b/src/Starward/Features/GachaOnly/GachaOnlyProfile.cs
+new file mode 100644
+index 0000000..4002aea
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaOnlyProfile.cs
+@@ -0,0 +1,65 @@
++// GachaOnly fork — single switch controlling every behavioural difference from upstream Starward.
++//
++// Rules for keeping `git rebase upstream/main` cheap:
++//   * upstream files receive at most one hook line each, and the hook reads `GachaOnlyProfile.Enabled`;
++//   * all logic lives in this folder (Features/GachaOnly), never inside Features/Gacha/**;
++//   * `Enabled` is a static readonly field, not a const, so the upstream build still compiles every
++//     code path (no CS0162 unreachable warnings) and behaves exactly like upstream.
++//
++// This file is new in the fork; upstream never touches it, so it can never conflict.
++
++using Starward.Features.GameLauncher;
++using Starward.Features.ViewHost;
++using System;
++
++namespace Starward.Features.Gacha;
++
++internal static class GachaOnlyProfile
++{
++
++#if GACHA_ONLY
++    private const bool BuildIsGachaOnly = true;
++#else
++    private const bool BuildIsGachaOnly = false;
++#endif
++
++
++    /// <summary>
++    /// True for the standalone gacha-record build (<c>-p:GachaOnly=true</c>), false for a plain
++    /// Starward build of the same source tree.
++    /// </summary>
++    public static readonly bool Enabled = BuildIsGachaOnly;
++
++
++    /// <summary>
++    /// Human readable product name, used in window titles, logs and diagnostics.
++    /// </summary>
++    public static string ProductName => Enabled ? "Starward Gacha" : "Starward";
++
++
++    /// <summary>
++    /// The page MainView falls back to: upstream jumps to the game launcher, the gacha build jumps
++    /// to the gacha record page (or to the "this game has no gacha record" notice page).
++    /// </summary>
++    public static Type GetFallbackPage(GameFeatureConfig? config)
++    {
++        if (!Enabled)
++        {
++            return typeof(GameLauncherPage);
++        }
++        if (config is null)
++        {
++            return typeof(BlankPage);
++        }
++        if (config.SupportedPages.Contains(nameof(GachaLogPage)))
++        {
++            return typeof(GachaLogPage);
++        }
++        if (config.SupportedPages.Contains(nameof(GenshinBeyondGachaPage)))
++        {
++            return typeof(GenshinBeyondGachaPage);
++        }
++        return typeof(GachaOnlyUnsupportedPage);
++    }
++
++}
+diff --git a/src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml b/src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml
+new file mode 100644
+index 0000000..b1cb6db
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml
+@@ -0,0 +1,34 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<!--  GachaOnly fork: shown when the selected game has no gacha record feature
++      (for example Honkai Impact 3rd). The gacha build never exposes the launcher page.  -->
++<sf:PageBase x:Class="Starward.Features.Gacha.GachaOnlyUnsupportedPage"
++            xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
++            xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
++            xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
++            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
++            xmlns:sf="using:Starward.Frameworks"
++            mc:Ignorable="d">
++
++    <Grid>
++        <StackPanel MaxWidth="520"
++                    HorizontalAlignment="Center"
++                    VerticalAlignment="Center"
++                    Spacing="12">
++            <FontIcon HorizontalAlignment="Center"
++                      FontSize="40"
++                      Glyph="&#xF4A5;" />
++            <TextBlock x:Name="TextBlock_Title"
++                       HorizontalAlignment="Center"
++                       Style="{ThemeResource SubtitleTextBlockStyle}"
++                       TextAlignment="Center"
++                       TextWrapping="Wrap" />
++            <TextBlock x:Name="TextBlock_Message"
++                       HorizontalAlignment="Center"
++                       Style="{ThemeResource BodyTextBlockStyle}"
++                       Opacity="0.8"
++                       TextAlignment="Center"
++                       TextWrapping="Wrap" />
++        </StackPanel>
++    </Grid>
++
++</sf:PageBase>
+diff --git a/src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml.cs b/src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml.cs
+new file mode 100644
+index 0000000..05052d9
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml.cs
+@@ -0,0 +1,59 @@
++// GachaOnly fork — notices page for games without gacha records.
++//
++// This file is new in the fork; upstream never touches it. Strings are resolved locally instead of
++// being added to the Starward.Language project, so the shared resx files stay untouched and
++// `git rebase upstream/main` keeps merging them cleanly.
++
++using Starward.Core;
++using Starward.Frameworks;
++using System.Globalization;
++
++namespace Starward.Features.Gacha;
++
++public sealed partial class GachaOnlyUnsupportedPage : PageBase
++{
++
++    public GachaOnlyUnsupportedPage()
++    {
++        this.InitializeComponent();
++    }
++
++
++    protected override void OnLoaded()
++    {
++        string language = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
++        (string title, string message) = GetText(language);
++        TextBlock_Title.Text = title;
++        TextBlock_Message.Text = string.Format(message, GetGameName(language));
++    }
++
++
++    private string GetGameName(string language)
++    {
++        return CurrentGameBiz.Game switch
++        {
++            GameBiz.bh3 => language switch
++            {
++                "zh" => "崩坏3",
++                "ja" => "崩壊3rd",
++                _ => "Honkai Impact 3rd",
++            },
++            _ => CurrentGameBiz.Value,
++        };
++    }
++
++
++    private static (string Title, string Message) GetText(string language)
++    {
++        return language switch
++        {
++            "zh" => ("该游戏没有抽卡记录",
++                     "当前选择的游戏（{0}）没有抽卡记录功能。\n请在左上角切换到《原神》《崩坏：星穹铁道》或《绝区零》。"),
++            "ja" => ("このゲームにはガチャ記録がありません",
++                     "選択中のゲーム（{0}）にはガチャ記録機能がありません。\n左上で『原神』『崩壊：スターレイル』『ゼンレスゾーンゼロ』に切り替えてください。"),
++            _ => ("This game has no gacha records",
++                  "The selected game ({0}) has no gacha record feature.\nSwitch to Genshin Impact, Honkai: Star Rail or Zenless Zone Zero in the top left corner."),
++        };
++    }
++
++}
+diff --git a/src/Starward/Features/GachaOnly/GameFeatureConfig.GachaOnly.cs b/src/Starward/Features/GachaOnly/GameFeatureConfig.GachaOnly.cs
+new file mode 100644
+index 0000000..ee223de
+--- /dev/null
++++ b/src/Starward/Features/GachaOnly/GameFeatureConfig.GachaOnly.cs
+@@ -0,0 +1,76 @@
++// GachaOnly fork — the per-game page table for the standalone gacha build.
++//
++// Hooked from GameFeatureConfig.FromGameId with a single line:
++//     return ApplyGachaOnlyProfile(config, gameId.GameBiz);
++// In a plain Starward build ApplyGachaOnlyProfile returns the upstream config untouched, so this
++// file is inert there and the fork still builds stock Starward from the same source tree.
++//
++// Games with gacha records keep exactly the gacha pages; games without them (Honkai Impact 3rd)
++// get the notice page instead of the launcher, so nothing in the app can navigate to a feature
++// that the fork does not expose.
++//
++// This file is new in the fork; upstream never touches it.
++
++using Starward.Core;
++using Starward.Features.Gacha;
++
++namespace Starward.Features;
++
++internal partial class GameFeatureConfig
++{
++
++
++    /// <summary>
++    /// Gacha-capable games (Genshin / Star Rail / Zenless Zone Zero, every server).
++    /// Only the gacha record pages stay reachable; every other navigation item collapses.
++    /// </summary>
++    private static readonly GameFeatureConfig GachaOnly = new()
++    {
++        SupportedPages =
++        [
++            nameof(GachaLogPage),
++            nameof(GenshinBeyondGachaPage),
++        ],
++        InGameNoticesWindow = false,
++        SupportHardLink = false,
++        SupportCloudGame = false,
++        SupportGameAccountSwitcher = false,
++        SupportDailyNote = false,
++    };
++
++
++    /// <summary>
++    /// Games that have no gacha record (Honkai Impact 3rd, and anything unknown).
++    /// </summary>
++    private static readonly GameFeatureConfig GachaOnlyNoGachaGame = new()
++    {
++        SupportedPages =
++        [
++            nameof(GachaOnlyUnsupportedPage),
++        ],
++        InGameNoticesWindow = false,
++        SupportHardLink = false,
++        SupportCloudGame = false,
++        SupportGameAccountSwitcher = false,
++        SupportDailyNote = false,
++    };
++
++
++    /// <summary>
++    /// The one hook called by <see cref="FromGameId(GameId?)"/>. Returns the upstream config
++    /// unchanged unless this is the GachaOnly build.
++    /// </summary>
++    private static GameFeatureConfig ApplyGachaOnlyProfile(GameFeatureConfig upstream, GameBiz biz)
++    {
++        if (!GachaOnlyProfile.Enabled)
++        {
++            return upstream;
++        }
++        return biz.Game switch
++        {
++            GameBiz.hk4e or GameBiz.hkrpg or GameBiz.nap => GachaOnly,
++            _ => GachaOnlyNoGachaGame,
++        };
++    }
++
++}
+diff --git a/src/Starward/Features/GameFeatureConfig.cs b/src/Starward/Features/GameFeatureConfig.cs
+index 95ce4fa..7af49cc 100644
+--- a/src/Starward/Features/GameFeatureConfig.cs
++++ b/src/Starward/Features/GameFeatureConfig.cs
+@@ -78,7 +78,9 @@ internal partial class GameFeatureConfig
+             GameBiz.nap_bilibili => nap_bilibili,
+             _ => Default,
+         };
+-        return config;
++        // GachaOnly hook: in the standalone gacha build only the gacha-record pages stay reachable.
++        // See Features/GachaOnly/GameFeatureConfig.GachaOnly.cs — returns config unchanged upstream.
++        return ApplyGachaOnlyProfile(config, gameId.GameBiz);
+     }
+ 
+ 
+diff --git a/src/Starward/Features/UrlProtocol/UrlProtocolService.cs b/src/Starward/Features/UrlProtocol/UrlProtocolService.cs
+index 5185de3..f46e5ba 100644
+--- a/src/Starward/Features/UrlProtocol/UrlProtocolService.cs
++++ b/src/Starward/Features/UrlProtocol/UrlProtocolService.cs
+@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
+ using Microsoft.Win32;
+ using Starward.Core;
+ using Starward.Core.HoYoPlay;
++using Starward.Features.Gacha;
+ using Starward.Features.GameLauncher;
+ using Starward.Features.PlayTime;
+ using System;
+@@ -19,6 +20,11 @@ internal class UrlProtocolService
+ 
+     public static void RegisterProtocol()
+     {
++        if (GachaOnlyProfile.Enabled)
++        {
++            // GachaOnly: never take over the starward:// protocol on the user's machine.
++            return;
++        }
+         UnregisterProtocol();
+         string exe;
+         if (AppConfig.IsPortable)
+diff --git a/src/Starward/Features/ViewHost/MainView.xaml.cs b/src/Starward/Features/ViewHost/MainView.xaml.cs
+index 44233ac..04b1585 100644
+--- a/src/Starward/Features/ViewHost/MainView.xaml.cs
++++ b/src/Starward/Features/ViewHost/MainView.xaml.cs
+@@ -207,19 +207,26 @@ public sealed partial class MainView : UserControl
+ 
+     private void NavigateTo(Type? page, object? param = null, NavigationTransitionInfo? infoOverride = null)
+     {
+-        page ??= typeof(GameLauncherPage);
++        // GachaOnly hook: upstream falls back to the game launcher; the gacha build falls back to
++        // the gacha record page (or the "no gacha records" notice page).
++        page ??= GachaOnlyProfile.GetFallbackPage(CurrentGameFeatureConfig);
+         if (page.Name is nameof(BlankPage) && CurrentGameId is null)
+         {
+ 
+         }
+         else if (page.Name is not nameof(SettingPage) && !CurrentGameFeatureConfig.SupportedPages.Contains(page.Name))
+         {
+-            page = typeof(GameLauncherPage);
++            page = GachaOnlyProfile.GetFallbackPage(CurrentGameFeatureConfig);
+         }
+         if (page.Name is nameof(GameLauncherPage))
+         {
+             MainView_NavigationView.SelectedItem = NavigationViewItem_Launcher;
+         }
++        else if (GachaOnlyProfile.Enabled && page.Name is nameof(GachaLogPage))
++        {
++            // keep the navigation pane showing the gacha entry as selected on startup
++            MainView_NavigationView.SelectedItem = NavigationViewItem_GachaLog;
++        }
+         MainView_Frame.Navigate(page, param ?? CurrentGameId, infoOverride);
+         if (page.Name is nameof(BlankPage) or nameof(GameLauncherPage))
+         {
+@@ -258,6 +265,12 @@ public sealed partial class MainView : UserControl
+ 
+     private async Task CheckUpdateOrShowRecentUpdateContentAsync()
+     {
++        if (GachaOnlyProfile.Enabled)
++        {
++            // GachaOnly: this fork is built and versioned separately, upstream releases must never
++            // be announced or installed over it.
++            return;
++        }
+ #if DEBUG || DONOT_CHECK_UPDATE
+         return;
+ #endif
+diff --git a/src/Starward/Features/ViewHost/MainWindow.xaml.cs b/src/Starward/Features/ViewHost/MainWindow.xaml.cs
+index 14bcea8..c688b40 100644
+--- a/src/Starward/Features/ViewHost/MainWindow.xaml.cs
++++ b/src/Starward/Features/ViewHost/MainWindow.xaml.cs
+@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
+ using Microsoft.Windows.AppLifecycle;
+ using Starward.Features.Background;
+ using Starward.Features.Database;
++using Starward.Features.Gacha;
+ using Starward.Features.GameLauncher;
+ using Starward.Features.Overlay;
+ using Starward.Features.Screenshot;
+@@ -56,8 +57,25 @@ public sealed partial class MainWindow : WindowEx
+         WTSRegisterSessionNotification(WindowHandle, 0);
+         if (AppWindow.Presenter is OverlappedPresenter presenter)
+         {
+-            presenter.IsMaximizable = false;
+-            presenter.IsResizable = false;
++            // GachaOnly hook: the standalone gacha app is freely resizable and maximizable.
++            // In a stock Starward build both stay false (upstream behaviour).
++            presenter.IsMaximizable = GachaOnlyProfile.Enabled;
++            presenter.IsResizable = GachaOnlyProfile.Enabled;
++            if (GachaOnlyProfile.Enabled)
++            {
++                Serilog.Log.Information("[GachaOnly] window presenter: resizable={Resizable} maximizable={Maximizable} state={State}",
++                                        presenter.IsResizable, presenter.IsMaximizable, presenter.State);
++                // the fork changes the window behaviour, so record what the window actually does
++                AppWindow.Changed += (_, e) =>
++                {
++                    if (e.DidSizeChange || e.DidPresenterChange)
++                    {
++                        Serilog.Log.Information("[GachaOnly] window changed: size={Width}x{Height} state={State} presenter={Presenter}",
++                                                AppWindow.Size.Width, AppWindow.Size.Height,
++                                                (AppWindow.Presenter as OverlappedPresenter)?.State, AppWindow.Presenter.Kind);
++                    }
++                };
++            }
+         }
+     }
+ 
+@@ -66,7 +84,10 @@ public sealed partial class MainWindow : WindowEx
+     public override void Show()
+     {
+         double uiScale = UIScale;
+-        if (Math.Abs(AppWindow.Size.Width - 1200 * uiScale) > 10 || Math.Abs(AppWindow.Size.Height - 676 * uiScale) > 10)
++        // GachaOnly hook: upstream snaps the window back to 1200x676 on every show; the gacha build
++        // keeps whatever size the user chose. The initial size comes from InitializeMainWindow.
++        if (!GachaOnlyProfile.Enabled
++            && (Math.Abs(AppWindow.Size.Width - 1200 * uiScale) > 10 || Math.Abs(AppWindow.Size.Height - 676 * uiScale) > 10))
+         {
+             CenterInScreen(1200, 676);
+         }
+@@ -198,10 +219,14 @@ public sealed partial class MainWindow : WindowEx
+         }
+         else if (uMsg == (uint)User32.WindowMessage.WM_SYSCOMMAND)
+         {
+-            if (wParam == 0xF030)
++            if (wParam == 0xF030 && !GachaOnlyProfile.Enabled)
+             {
+                 // SC_MAXIMIZE
+                 // 防止双击标题栏使窗口最大化，WinAppSDK 某个版本的 Bug
++                // GachaOnly hook: this branch also swallowed the maximise caption button, the
++                // snap-layout click and Win+Up, which looked like "clicking maximise does nothing
++                // and only the snap flyout shows". The gacha build has a resizable, maximisable
++                // window, so it lets the command through instead of returning early.
+                 return IntPtr.Zero;
+             }
+         }
+diff --git a/src/Starward/Starward.csproj b/src/Starward/Starward.csproj
+index d922f57..943a039 100644
+--- a/src/Starward/Starward.csproj
++++ b/src/Starward/Starward.csproj
+@@ -1,4 +1,4 @@
+-﻿<Project Sdk="Microsoft.NET.Sdk">
++<Project Sdk="Microsoft.NET.Sdk">
+ 	<PropertyGroup>
+ 		<OutputType>WinExe</OutputType>
+ 		<TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+@@ -82,4 +82,44 @@
+ 		<Delete Files="$(PublishDir)onnxruntime.dll" />
+ 	</Target>
+ 
++	<!-- =================================================================== -->
++	<!-- GachaOnly fork: isolated customization block.                       -->
++	<!-- Nothing above this line is modified, so upstream edits to this file -->
++	<!-- keep merging cleanly. Build the standalone gacha app with:          -->
++	<!--   dotnet publish src/Starward -c Release -r win-x64 -p:Platform=x64 -->
++	<!--                  -p:GachaOnly=true -p:Version=<ver>                 -->
++	<!-- Build stock Starward from the same tree with -p:GachaOnly=false.    -->
++	<!-- =================================================================== -->
++	<PropertyGroup>
++		<GachaOnly Condition="'$(GachaOnly)' == ''">true</GachaOnly>
++	</PropertyGroup>
++
++	<PropertyGroup Condition="'$(GachaOnly)' == 'true'">
++		<AssemblyName>Starward.GachaOnly</AssemblyName>
++		<Product>Starward Gacha</Product>
++		<DefineConstants>$(DefineConstants);GACHA_ONLY</DefineConstants>
++		<!-- The build machine has no Windows SDK (no windows.winmd) and no Visual Studio: the CsWinRT
++		     projection / AOT optimizer steps need one, while WinAppSDK already ships the C#
++		     projection assemblies. Pass -p:WindowsSdkAvailable=true on a machine with a full SDK to
++		     turn both steps back on (upstream's default behaviour). -->
++		<WindowsSdkAvailable Condition="'$(WindowsSdkAvailable)' == ''">false</WindowsSdkAvailable>
++		<CsWinRTGenerateProjection Condition="'$(WindowsSdkAvailable)' != 'true'">false</CsWinRTGenerateProjection>
++		<CsWinRTAotOptimizerEnabled Condition="'$(WindowsSdkAvailable)' != 'true'">false</CsWinRTAotOptimizerEnabled>
++		<!-- Trimming / ReadyToRun depend on the CsWinRT AOT optimizer to keep the XAML types alive;
++		     without it a trimmed Release build dies at XAML startup with 0xC000027B. Disable both when
++		     the SDK is missing (size is not a concern for this fork). build.ps1 passes the same two
++		     properties on the command line, which wins over the publish profile. -->
++		<PublishTrimmed Condition="'$(WindowsSdkAvailable)' != 'true'">false</PublishTrimmed>
++		<PublishReadyToRun Condition="'$(WindowsSdkAvailable)' != 'true'">false</PublishReadyToRun>
++	</PropertyGroup>
++	<!-- ==================== end GachaOnly customization =================== -->
++	<!-- Portable package layout: the release archive keeps Starward's own shape, i.e. a launcher
++	     next to app-<version>\Starward.exe, so the published app is named Starward.exe when this
++	     switch is on (gacha-fork/package.ps1 passes -p:PortableLayout=true). Development builds stay
++	     Starward.GachaOnly.exe. Deliberately not a command-line AssemblyName override: that is a
++	     global property and would rename every referenced project as well. -->
++	<PropertyGroup Condition="'$(GachaOnly)' == 'true' and '$(PortableLayout)' == 'true'">
++		<AssemblyName>Starward</AssemblyName>
++	</PropertyGroup>
++
+ </Project>

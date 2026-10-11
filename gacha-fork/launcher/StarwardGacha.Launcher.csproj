@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--  GachaOnly fork: portable-package launcher, the C# equivalent of upstream's
+        src/Starward.Launcher (C++). It exists so the release keeps the same shape as Starward's
+        own portable package:
+
+            Starward.exe     <- this launcher
+            version.ini      <- version=<version>
+            app-<version>\   <- the actual app (published with -p:AssemblyName=Starward)
+
+        The upstream launcher is a vcxproj and needs the MSVC toolchain, which the build machine
+        does not have, so the behaviour is reimplemented here.  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Starward</AssemblyName>
+    <RootNamespace>Starward.Launcher</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- the launcher is plain BCL code, so trimming is safe here (unlike the XAML app) -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,38 @@
+using System.Text.Json.Serialization;
+
+namespace Starward.Core.HoYoPlay;
+
+/// <summary>
+/// 图片、带有链接的图片
+/// </summary>
+public class GameImage
+{
+
+    /// <summary>
+    /// 图片链接
+    /// </summary>
+    [JsonPropertyName("url")]
+    public string Url { get; set; }
+
+    [JsonPropertyName("hover_url")]
+    public string HoverUrl { get; set; }
+
+    /// <summary>
+    /// 点击图片后打开的链接
+    /// </summary>
+    [JsonPropertyName("link")]
+    public string Link { get; set; }
+
+    [JsonPropertyName("login_state_in_link")]
+    public bool LoginStateInLink { get; set; }
+
+
+    [JsonPropertyName("md5")]
+    public string MD5 { get; set; }
+
+
+    [JsonPropertyName("size")]
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString | JsonNumberHandling.WriteAsString)]
+    public long Size { get; set; }
+
+}
