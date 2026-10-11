@@ -9,6 +9,8 @@
 
 ---
 
+<img width="2560" height="1386" alt="image" src="https://github.com/user-attachments/assets/e5e9b5ca-0663-4e25-add2-0c5b6ed33255" />
+
 ## 怎么编
 
 ```powershell
