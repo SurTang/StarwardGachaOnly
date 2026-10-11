@@ -1,3 +1,1431 @@
+diff --git a/.github/workflows/gacha-package.yml b/.github/workflows/gacha-package.yml
+new file mode 100644
+index 0000000..eed3cd3
+--- /dev/null
++++ b/.github/workflows/gacha-package.yml
+@@ -0,0 +1,115 @@
++name: Gacha Package
++
++# Trigger routing (GitHub runs every workflow whose `on:` matches):
++#   build.yml            push to main/dev/*, PR  -> upstream build, artifacts only, no release
++#   publish_preview*.yml  ANY tag (tags: ["*"])  -> upstream release jobs, need upstream secrets
++#   this file            manual run, gacha-* tag -> the two archives, release on a tag
++#
++# IMPORTANT before pushing a tag: disable upstream's three publish workflows in the fork, otherwise
++# they fire as well, fail on missing secrets, and may create a *draft* release first — a release is
++# located by tag, so this job would then attach its assets to that draft and the release would stay
++# unpublished. Disabling is a repository setting, no file changes, so upstream still merges cleanly:
++#
++#   gh workflow disable "Publish Preview"   --repo <owner>/<repo>
++#   gh workflow disable "Publish Preview 2" --repo <owner>/<repo>
++#   gh workflow disable "Publish Preview 3" --repo <owner>/<repo>
++#
++# Archives produced (see gacha-fork/package.ps1):
++#   StarwardGacha_Portable_<version>_<arch>.zip   launcher + version.ini + app-<version>/
++#   StarwardGacha_Source_<version>.zip            source tree + gacha-fork/
++
++on:
++  workflow_dispatch:
++    inputs:
++      version:
++        description: Version stamped into version.ini and the archive names
++        required: true
++        default: 0.1.0
++      data_folder:
++        description: Optional UserDataFolder written into gacha-data.ini (leave empty to omit)
++        required: false
++        default: ''
++      publish_release:
++        description: Also create a GitHub Release for this manual run
++        type: boolean
++        required: false
++        default: false
++  push:
++    tags: ['gacha-*']
++
++permissions:
++  contents: write
++
++jobs:
++
++  package:
++    runs-on: windows-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        platform: [x64]
++
++    steps:
++    - name: Checkout
++      uses: actions/checkout@v5
++
++    - name: Install .NET
++      uses: actions/setup-dotnet@v5
++      with:
++        global-json-file: global.json
++
++    - name: Resolve version
++      id: ver
++      shell: pwsh
++      run: |
++        $version = "${{ github.event.inputs.version }}"
++        if ([string]::IsNullOrWhiteSpace($version)) {
++          $version = "${{ github.ref_name }}" -replace '^gacha-', ''
++        }
++        "version=$version" >> $env:GITHUB_OUTPUT
++        Write-Output "packaging $version for ${{ matrix.platform }}"
++
++    - name: Package (portable + source)
++      shell: pwsh
++      run: |
++        $arguments = @(
++          '-Version', '${{ steps.ver.outputs.version }}',
++          '-Architecture', '${{ matrix.platform }}'
++        )
++        $dataFolder = "${{ github.event.inputs.data_folder }}"
++        if (-not [string]::IsNullOrWhiteSpace($dataFolder)) {
++          $arguments += @('-DataFolder', $dataFolder)
++        }
++        & .\gacha-fork\package.ps1 @arguments
++
++    - name: Upload archives as workflow artifacts
++      uses: actions/upload-artifact@v7
++      with:
++        name: StarwardGacha_${{ steps.ver.outputs.version }}_${{ matrix.platform }}
++        path: gacha-fork/dist/*.zip
++        if-no-files-found: error
++        retention-days: 30
++
++    - name: Publish GitHub Release
++      # a tag push always publishes; a manual run only when the input asks for it
++      if: startsWith(github.ref, 'refs/tags/gacha-') || inputs.publish_release == true
++      uses: softprops/action-gh-release@v3
++      with:
++        name: Starward Gacha ${{ steps.ver.outputs.version }}
++        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('gacha-{0}', steps.ver.outputs.version) }}
++        files: gacha-fork/dist/*.zip
++        draft: false
++        prerelease: false
++        body: |
++          Starward Gacha ${{ steps.ver.outputs.version }}（${{ matrix.platform }}）
++
++          独立抽卡记录应用：只保留祈愿记录模块，支持记录图导出与数量统计导出，窗口可自由缩放/最大化。
++
++          | 资产 | 说明 |
++          |---|---|
++          | `StarwardGacha_Portable_*.zip` | 便携版：`Starward.exe` 启动器 + `version.ini` + `app-<版本>/`，解压即用 |
++          | `StarwardGacha_Source_*.zip` | 源码包：完整源码树 + `gacha-fork/`（文档、脚本、启动器源码、补丁） |
++
++          - 与官方 Starward 共用同一个数据目录（便携包内 `gacha-data.ini` 可改，删掉则自动探测）
++          - 上游 [Scighost/Starward](https://github.com/Scighost/Starward)（MIT），署名与许可证原样保留
++          - 无代码签名，首次运行可能触发 SmartScreen 提示
+diff --git a/gacha-fork/.gitignore b/gacha-fork/.gitignore
+new file mode 100644
+index 0000000..1e6420b
+--- /dev/null
++++ b/gacha-fork/.gitignore
+@@ -0,0 +1,12 @@
++# GachaOnly fork build output — never part of the source package or the repo history.
++dist/
++out/
++backup/
++
++# launcher intermediate output
++launcher/bin/
++launcher/obj/
++
++# generated from the fork commit by build tooling
++gacha-only.patch
++gacha-only.diff
+diff --git a/gacha-fork/PACKAGE-README.md b/gacha-fork/PACKAGE-README.md
+new file mode 100644
+index 0000000..a4d0f02
+--- /dev/null
++++ b/gacha-fork/PACKAGE-README.md
+@@ -0,0 +1,52 @@
++# Starward Gacha — 源码包
++
++[Starward](https://github.com/Scighost/Starward) 的独立抽卡记录应用（fork）源码。同一份源码树既能编出
++`Starward Gacha`，也能编出原生 Starward。
++
++- 上游基线：`Scighost/Starward` `main` @ 2026-10-08（`game management`，commit `607a3077`）
++- 许可：MIT —— 上游 `LICENSE` 与署名原样保留
++- 上游原始 README 保留在 `README.upstream.md`（本文件替换了它，便于一眼看出这是哪个项目）
++
++---
++
++## 怎么编
++
++```powershell
++# 独立抽卡应用（默认）
++dotnet build src/Starward/Starward.csproj -c Debug -r win-x64 -p:Platform=x64 -p:GachaOnly=true
++
++# 上游原生 Starward（同一份源码树，用于对照/回归）
++dotnet build src/Starward/Starward.csproj -c Debug -r win-x64 -p:Platform=x64 -p:GachaOnly=false
++```
++
++- 没有 Windows SDK 的机器会自动走 `WindowsSdkAvailable=false`（关闭 CsWinRT 投影与裁剪，Release 才不会
++  在 XAML 启动时崩 0xC000027B）；有完整 SDK 时加 `-p:WindowsSdkAvailable=true` 可启用上游默认行为。
++- 直接出便携版：`powershell -File gacha-fork\package.ps1 -Version 0.1.0 -DataFolder <共用数据目录>`
++- 旧版发布脚本：`powershell -File gacha-fork\build.ps1 -Version 0.1.0`
++
++## 包内有什么
++
++| 路径 | 说明 |
++|---|---|
++| `src/**` | 上游 Starward 全部源码 + 本 fork 的新增文件与挂钩 |
++| `gacha-fork/README.md` | **本 fork 的完整文档**：为什么"屏蔽而非抽离"、改动清单、导出功能与版式、打包、验证记录、未处理项 |
++| `gacha-fork/gacha-only.patch` / `.diff` | 相对上游的全部改动，`git am` 可直接打 |
++| `gacha-fork/build.ps1` | 发布构建（自包含 Release） |
++| `gacha-fork/package.ps1` | 打包源码包 / 便携包（含启动器编译） |
++| `gacha-fork/sync-upstream.ps1` | 合并上游并列出补丁面与冲突文件 |
++| `gacha-fork/launcher/` | 便携包启动器源码（C#；上游那个是 C++，本机无 MSVC 故重写等价实现） |
++| `gacha-fork/tools/` | 数据库热备份脚本 + 若干数据核对脚本 |
++| `README.upstream.md` | 上游原始 README |
++
++## 改动面（这就是全部）
++
++- **新增文件**（上游永远不会碰 → 永不冲突）
++  - `src/Starward/Features/GachaOnly/**`：11 个文件（开关、页面表、数据目录解析、无抽卡提示页、
++    导出模型 / 卡片 / 预览窗口 / 命令行）
++  - `src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs`：上游快照破损的兼容层（上游修好后可删）
++- **上游文件挂钩**：10 个文件、每处 1~6 行
++  `Features/GameFeatureConfig.cs`、`Features/ViewHost/MainView.xaml.cs`、`Features/ViewHost/MainWindow.xaml.cs`、
++  `Features/Gacha/GachaLogPage.xaml(.cs)`、`App.xaml.cs`、`AppConfig.Configuration.cs`、
++  `AppConfig.ServiceProvider.cs`、`Features/UrlProtocol/UrlProtocolService.cs`、`Starward.csproj`
++- **没有**改命名空间、**没有**移动文件、**没有**改数据库结构 —— 这样上游的新功能/bug 修复才能持续 `git merge`
++  进来（细节与取舍见 `gacha-fork/README.md`）
+diff --git a/gacha-fork/README.md b/gacha-fork/README.md
+new file mode 100644
+index 0000000..39bfef2
+--- /dev/null
++++ b/gacha-fork/README.md
+@@ -0,0 +1,392 @@
++# Starward Gacha — 独立抽卡记录应用（fork 说明）
++
++本目录**不是**应用源码，而是这个 fork 的**全部增量**：构建脚本、同步脚本、诊断工具、备份与文档。
++应用源码就是仓库根目录下的上游 Starward 源码树 + 我新增/挂钩的少量文件。
++
++- 上游：<https://github.com/Scighost/Starward>（MIT）
++- 快照基线：`main` @ 2026-10-08 的 `game management` 提交（见下文「上游已知破损」）
++- 产物：`Starward.GachaOnly.exe`（同一份源码树也能编出原生 Starward：`-p:GachaOnly=false`）
++
++---
++
++## 1. 做法：屏蔽而非抽离
++
++诉求是「把祈愿记录独立成一个应用，同时保证后续能持续合并上游的新功能/bug 修复」。
++上游在 `Features/` 重构之后已经是**数据驱动的页面开关**架构：
++
++```csharp
++// Features/ViewHost/MainView.xaml.cs
++NavigationViewItem_GachaLog.Visibility = CurrentGameFeatureConfig.SupportedPages.Contains(nameof(GachaLogPage)).ToVisibility();
++```
++
++`CurrentGameFeatureConfig` 由 `Features/GameFeatureConfig.cs` 的 `FromGameId()` 按区服给出。
++所以「只留抽卡」= 让这份 `SupportedPages` 只包含抽卡页 —— 一处配置级改动，而不是模块手术。
++抽离成新工程需要切断 `Gacha → GameRecord / GameLauncher / ViewHost` 三条跨模块边（其中
++`GameRecord` 有 1.3 万行，绝区零抽卡同步需要它的 Hoyolab 登录与角色列表），并且会把「合并上游」
++变成「手工回放上游对 Gacha 的每一次改动」——与诉求二直接冲突。
++
++**结论：屏蔽式方案，源码只增不改。**
++
++---
++
++## 2. 改动清单（这就是全部）
++
++新增文件（上游永远不会碰，因此永不冲突）：
++
++| 文件 | 作用 |
++|---|---|
++| `src/Starward/Features/GachaOnly/GachaOnlyProfile.cs` | 唯一开关 `GachaOnlyProfile.Enabled`（`#if GACHA_ONLY`）、默认落地页选择 `GetFallbackPage()` |
++| `src/Starward/Features/GachaOnly/GameFeatureConfig.GachaOnly.cs` | `partial class GameFeatureConfig`：抽卡专区页面表 + 无抽卡游戏（崩坏3）的提示页配置 |
++| `src/Starward/Features/GachaOnly/GachaOnlyDataFolder.cs` | 共用数据目录解析（见第 3 节） |
++| `src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml(.cs)` | 「该游戏没有抽卡记录」提示页（中/日/英，不往 `Lang` 资源里加 key） |
++| `src/Starward/Features/GachaOnly/GachaExportModels.cs` | 导出图片的数据模型 + 总览指标计算 + 分页 + 图标加载 |
++| `src/Starward/Features/GachaOnly/GachaExportCard.xaml(.cs)` | 导出图片的卡片视觉（浅色、固定宽度、代码布局，见第 7 节） |
++| `src/Starward/Features/GachaOnly/GachaExportWindow.xaml(.cs)` | 预览窗口 + 保存 PNG / 复制到剪贴板；分页渲染并拼接 |
++| `src/Starward/Features/GachaOnly/GachaExportCli.cs` | 无头导出命令行 `--export-gacha-image` |
++| `src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs` | 上游破损的兼容层，见第 6 节；上游修好后可整文件删除 |
++
++上游文件各**一处**挂钩（每处 1~4 行，`GachaOnlyProfile.Enabled == false` 时行为与上游完全一致）：
++
++| 文件 | 改动 |
++|---|---|
++| `Features/GameFeatureConfig.cs` | `return ApplyGachaOnlyProfile(config, gameId.GameBiz);` |
++| `Features/ViewHost/MainView.xaml.cs` | ① `NavigateTo` 的两处 `typeof(GameLauncherPage)` 兜底 → `GachaOnlyProfile.GetFallbackPage(...)`；② 抽卡页在导航栏保持选中；③ 关闭上游更新检查 |
++| `Features/ViewHost/MainWindow.xaml.cs` | 窗口可自由缩放 + 最大化（`presenter.IsResizable/IsMaximizable = GachaOnlyProfile.Enabled`；`Show()` 不再把窗口拉回 1200×676；`SC_MAXIMIZE` 只在 stock 构建里吞掉，见第 8 节）） |
++| `Features/Gacha/GachaLogPage.xaml(.cs)` | 顶栏增加「导出为图片」「导出统计数量」两个按钮（同一样式，stock 构建下隐藏） |
++| `App.xaml.cs` | ① `starward://` 不处理；② `starward://test/` 不处理；③ 跳过 `--hide` 托盘启动分支；④ 独立实例键 `StarwardGacha` + 窗口标题 `Starward Gacha`；⑤ 无头导出命令行 hook |
++| `AppConfig.Configuration.cs` | `userDataFolder = GachaOnlyDataFolder.Resolve() ?? userDataFolder;` |
++| `AppConfig.ServiceProvider.cs` | 日志文件名 `StarwardGacha_yyMMdd.log`（不与官方版抢同一个日志文件）+ 启动时记录数据目录 |
++| `Features/UrlProtocol/UrlProtocolService.cs` | `RegisterProtocol()` 直接返回：不抢占 `starward://` |
++| `Starward.csproj` | 文件末尾一个隔离块：`AssemblyName` / `Product` / `GACHA_ONLY` 常量 / 无 Windows SDK 时关闭 CsWinRT 与裁剪 |
++
++**没有做**（为可合并性刻意不做）：改命名空间、移动/重命名 `Features/Gacha/**` 任何文件、改数据库
++表名或 schema、往 `Starward.Language` 的 resx 里加 key、拆 `AppConfig` 分部类、换 DI 注册方式。
++
++---
++
++## 3. 数据目录：与现有 Starward 共用
++
++解析顺序（第一个命中者生效，可诊断日志见 `%LOCALAPPDATA%\Starward\log\GachaOnly-data-folder.log`）：
++
++1. 命令行 `--data-folder <path>` / `--data-folder=<path>`
++2. 环境变量 `STARWARD_GACHA_DATA_FOLDER`
++3. **exe 同目录的 `gacha-data.ini`**：`UserDataFolder=<path>`（推荐，`build.ps1 -DataFolder` 会生成）
++4. 自动探测：`%LOCALAPPDATA%\Starward` → `<盘>:\Mihoyo\Starward` → `%LOCALAPPDATA%\MihoyoWishBook` → `<盘>:\Starward` → exe 所在目录（候选必须含 `StarwardDatabase.db`）
++5. 都没有 → 回落到上游逻辑（注册表 / 便携 `config.ini` / 首次运行向导）
++
++本机实测：`UserDataFolder=F:\Mihoyo\Starward`，与官方版 Starward 0.18.2 共用同一个
++`StarwardDatabase.db`，抽卡记录直接可见。
++
++共用带来的**相互影响**（都源于上游把设置也存进同一个 DB）：
++
++- 设置项（`GachaLanguage`、`LastUid…`、`CloseWindowOption`、`CurrentGameBiz` …）是共享的，本应用改了官方版也会跟着变；
++- 自动备份 `%LOCALAPPDATA%\Starward\DatabaseBackup\*.7z` 也是共享目录，两个应用都会往里写；
++- 官方版与本应用可同时运行（SQLite WAL 支持多进程），但不要同时执行「导入/删除抽卡记录」这类写操作；
++- 日志已分开（`StarwardGacha_*.log` vs `Starward_*.log`）。
++
++想要完全隔离：把 `gacha-data.ini` 指到一个空目录即可（会新建自己的库）。
++
++---
++
++## 4. 构建
++
++```powershell
++# 正式打包（Release，x64，产物带 gacha-data.ini）
++.\gacha-fork\build.ps1 -Version 0.1.0 -DataFolder 'F:\Mihoyo\Starward'
++
++# 编原生 Starward（对照/排查用）
++.\gacha-fork\build.ps1 -Stock
++
++# 直接 dotnet（等价）
++E:\A-Dev\deepseek-harness\.dotnet\dotnet.exe publish src\Starward\Starward.csproj `
++    -c Release -r win-x64 -o out\StarwardGacha -p:Platform=x64 -p:GachaOnly=true -p:Version=0.1.0
++```
++
++环境要点（本机踩过）：
++
++- **没有 Windows SDK / Visual Studio**：`CsWinRTGenerateProjection` / `CsWinRTAotOptimizerEnabled` 需要在
++  隔离块里关掉（WinAppSDK 自带 C# projection）。机器上装了完整 SDK 时加 `-UseWindowsSdk`（即
++  `-p:WindowsSdkAvailable=true`）恢复上游默认。
++- **Release 打包必须关裁剪**：上游 `Properties/PublishProfiles/win-*.pubxml` 给 Release 开了
++  `PublishTrimmed=True` + `PublishReadyToRun=True`，这两步依赖 CsWinRT AOT 优化器（同样要 Windows SDK）。
++  缺 SDK 时照旧裁剪，程序会在 XAML 启动阶段以 `0xC000027B`（STATUS_STOWED_EXCEPTION）直接退出。
++  `build.ps1` 因此在缺 SDK 时自动追加 `-p:PublishTrimmed=false -p:PublishReadyToRun=false`
++  （产物约 270 MB / 937 文件，符合"不在意体积"的前提）；`Starward.csproj` 的隔离块里也写了同样的条件属性。
++- .NET SDK 在 `E:\A-Dev\deepseek-harness\.dotnet`（`dotnet.exe` 默认不在 PATH）；
++  项目 `global.json` 要求 `10.0.400`。
++- 本机 GitHub 直连不通（`git clone` 超时），但 NuGet 与 `builds.dotnet.microsoft.com` 可用，
++  所以 NuGet 还原与 SDK 安装正常；同步上游请在有 GitHub 网络的环境执行。
++
++---
++
++## 5. 与上游同步
++
++```powershell
++.\gacha-fork\sync-upstream.ps1          # fetch upstream/main 并 rebase
++.\gacha-fork\sync-upstream.ps1 -Check   # 只预演，不改历史
++.\gacha-fork\sync-upstream.ps1 -Merge   # 用 merge 代替 rebase
++```
++
++模型：fork 只有**一个**提交贴在 `upstream/main` 上面，冲突只可能出现在第 2 节表格里那 10 个文件、
++且是 1~4 行级别。上游改 `Features/Gacha/**`（新卡池、新游戏、bug 修复）**零冲突**，直接继承。
++
++`gacha-fork/gacha-only.patch`（`git am` 可用）与 `gacha-fork/gacha-only.diff`（纯 diff，便于审阅）
++是同一份改动的两种导出，可应用到全新的上游克隆上：
++
++```powershell
++git clone https://github.com/Scighost/Starward.git && cd Starward
++git am ..\gacha-fork\gacha-only.patch     # 或： git apply ..\gacha-fork\gacha-only.diff
++```
++
++---
++
++## 6. 上游已知破损与兼容层（重要）
++
++上游 `main` 的 `game management` 提交（`607a3077`，2026-10-08）把 `HoYoPlayClient` 的
++「按启动器查询」重载移到了新的 `Starward.GameManagement` 项目，但 `Starward.RPC` 与
++`Starward/Features/HoYoPlay/HoYoPlayService.cs` 仍在调用旧签名 —— **该提交上游 CI 就是红的**
++（Actions run #2322，conclusion: failure），直接编这份快照必然失败（`GetGameInfoAsync` 等 19+ 处）。
++
++处理方式：`src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs` 用**扩展方法**把这批旧重载补回来，
++并且是**有实际语义**的实现：`LauncherId → LauncherConfig` 的映射在 Core 里是静态的
++（`LauncherConfig.ChinaOfficial / GlobalOfficial / Bilibili*`），所以国服/国际服/B 服的游戏列表、
++背景图、配置、分支都会打到各自正确的接口上，不是空壳。
++
++上游修好后（恢复重载，或把 RPC/HoYoPlayService 迁到 `Starward.GameManagement`）：直接删除该文件即可
++（实例方法优先于扩展方法，届时它只是死代码）。
++
++---
++
++## 7. 导出图片（独立应用新增）
++
++入口：抽卡记录页**顶栏**两个按钮 —— **导出为图片** / **导出统计数量**（和「更新记录」「设置」同一行、同一
++样式；stock 构建下隐藏）。两者都会打开预览窗口（可滚动查看整张卡片），底部工具栏提供 **保存为 PNG** 与
++**复制到剪贴板**。
++
++### 卡片结构
++
++**一张图、一个页头、一个页脚，正文是双列瀑布（masonry）**：每个卡池是一整块（不可拆分），
++按"事件池在前（抽数从多到少）、常驻池在最后"的顺序放进当前较矮的那一列 —— 原神是
++角色池（左）/ 武器池（右上）/ 常驻池（右下），星铁是 角色活动（左）/ 光锥活动、角色联动、光锥联动（右）/
++**群星跃迁（最下）**。常驻池靠"这一池有没有 UP 机制"来识别，不需要硬编码卡池类型数字。
++
++- 顶部：游戏名 · UID · 记录区间 · 总抽数 · 卡池数 + 右上角游戏图标；
++- 每个卡池块：标题 + 抽数 + 区间，数据总览指标，五星历史按年份分组；
++- **五星标记**：左上角垫抽数按阈值配色 —— **1–10 黄、11–40 蓝、41–75 紫、76+ 红**（角色/武器/常驻一致）；
++  右上角**只给 UP 的打绿色 UP 标签，歪的不做任何标注**（常驻池无 UP 概念，同样不标）；
++- **指标 8 项（角色池与武器池一致）**：未出五星 / 五星平均 / 小保底不歪 / 最非 / 未出四星 / UP平均 /
++  UP花费 / 最欧；常驻池没有 UP 机制，自动只显示 5 项；
++- 指标宫格按数量选列数（5~6 个用 3 列、7~8 个用 4 列），避免"第二行只剩一个"；
++- 只有 1 个卡池时自动退化为**单列**（每行 14 个图标，更矮）。
++
++### 武器池的 UP 是怎么来的
++
++上游的 `GachaNoUp` 表里只有 **hk4e301**，**没有 hk4e302**（星铁 11/12/21/22、绝区零 2/3 都有），
++所以 Starward 本体在武器池上无法判断 UP，导出里原本连"小保底不歪"都出不来。我在
++`GachaExportModels.cs` 里按同一机制补了一份**标准五星武器池**（天空之刃/天空之傲/天空之翼/天空之卷/
++天空之脊/狼的末路/四风原典/阿莫斯之弓/和璞鸢/风鹰剑），该卡池里不在此列表的即为 UP。
++
++- 该列表用本机数据验证过：武器池 26 个五星中 **7 个歪（27%，理论 25%）**，小保底不歪 **73.7%**（理论 75%）；
++- 用"常驻池出过的五星"反推标准池是**错的**（会漏掉 4 把玩家没在常驻抽到过的标准武器，把不歪率抬到 91.7%）；
++- 上游若哪天给 `GachaNoUp` 加上 hk4e302，删掉 `ExtraStandardPools` 里那一项即可。
++
++### 数量统计导出（导出统计数量）
++
++按物品统计抽到次数（对应侧边栏的"数量统计"面板）：五星、四星各一节，**先按数量从多到少，数量相同则角色在
++前、武器在后**（识别方式：`ItemType` 落在武器类名表里的算武器 —— 武器/光锥/音擎及其英日写法），同类型再按
++名称排序。卡片是单列宽版，每个格子是图标 + 次数药丸 + 名称，**角色次数用蓝底、武器用灰底**，一眼能看出
++排序结果。条数超过 240 才会截断并标注。
++
++```powershell
++Starward.GachaOnly.exe --export-gacha-counts counts.png [--uid 110369802] [--game hk4e_cn]
++```
++
++### 为什么是这个布局（不是照抄参考图的三列）
++
++| 方案 | 问题 |
++|---|---|
++| 每个卡池一列（参考图那种三列） | 真实数据里卡池大小极不均衡（角色池 90 个五星 vs 常驻池 16 个），矮的列下半截会留一大片空白；列变窄后每行只能放 5 个图标 |
++| 纵向多张卡片再拼接 | **这就是上一版的问题**：每页自带边框/页头/页脚，拼起来中间出现"窄一块"的接缝，页头重复 |
++| **双列瀑布（当前）** | 主池独占一列、小池叠在另一列，空白最少；宽 1600 DIP 让每行能放 7 个更大的图标；高度可控（原神整套 ~2650 DIP），**一次渲染**，天然没有接缝 |
++
++### 实现要点（踩过的坑都在代码注释里）
++
++- `RenderTargetBitmap` 单次渲染上限 4096 px：卡片按 2× 渲染，若布局高度超过 4000/2 DIP 就**整体按比例缩小**
++  （实测原神 1.51×、星铁 1.97×），而不是分页拼接——分页就会留下上面说的接缝；
++- 卡片根元素必须自带固定宽度并放在可横向滚动的预览里，否则会被窗口里的 `ScrollViewer` 压窄，
++  渲染出来右边被裁（上一版 1600 的卡片实际只有 1192 宽）；
++- 图标（`*_GachaInfo.Icon` 里的 URL）在**后台线程下载/命中缓存**，`BitmapImage` 必须在 **UI 线程**解码；
++- 小保底不歪：一个卡池的五星序列里，只有「上一个五星是 UP」的那次才算 50/50（上一个非 UP 则为大保底）；
++  序列按游戏自身记录 `Id` 排序（导入的时间戳常出现同分钟重复，按 Time 排序会乱序）；
++- 命令行无头导出（便于自动化/定时备份）：
++  ```powershell
++  Starward.GachaOnly.exe --export-gacha-image out.png [--uid 110369802] [--game hk4e_cn]
++  ```
++  省略 `--uid` 则用上次在应用里选择的账号；省略 `--game` 则用当前选择的游戏；无记录时退出码 1。
++
++---
++
++## 8. 打包（源码包 / 便携包）
++
++```powershell
++powershell.exe -ExecutionPolicy Bypass -File gacha-fork\package.ps1 -Version 0.1.0 `
++    -Architecture x64 -DataFolder 'F:\Mihoyo\Starward'
++```
++
++产出在 `gacha-fork/dist/`：
++
++| 文件 | 内容 |
++|---|---|
++| `StarwardGacha_Portable_0.1.0_x64.zip`（约 118 MB） | 便携版，结构与官方 portable 包一致（见下） |
++| `StarwardGacha_Source_0.1.0.zip`（约 1.8 MB） | 源码包：`git archive` 的源码树 + `gacha-fork/`（文档、脚本、启动器源码、补丁），**不含任何 bin/obj/out/backup** |
++
++源码包里的入口文档以本 fork 为主：根 `README.md` = `gacha-fork/PACKAGE-README.md`（说明这是什么项目、怎么编、
++改动面），上游原版另存为 `README.upstream.md`（仓库内的 `README.md` 保持上游原文不动，避免每次上游改 README
++都冲突）。
++
++### 在 GitHub Actions 上打包
++
++先看清**哪个文件在什么时候跑** —— GitHub 会把所有 `on:` 匹配的工作流都跑一遍，它们是并存的：
++
++| 工作流 | 触发 | 做什么 |
++|---|---|---|
++| `build.yml`（上游） | push 到 `main` / `dev/*`、PR | 编 C++ 启动器 + app → `build/Starward/` 上传 artifact，版本号 `0.0.1-build.<sha>`；**不看 tag、不发 Release** |
++| `publish_preview.yml` / `_2` / `_3`（上游） | **任意 tag**（`tags: ["*"]`） | 需要上游的 SignPath / OSS / 签名密钥 —— fork 里必然失败，而且 `merge-publish` 会去创建 **draft release** |
++| `convert_preview_to_stable.yml`、`publish_res_signpath.yml`（上游） | 手工 | 上游发布流程的后续步骤，fork 里用不到 |
++| **`gacha-package.yml`（本 fork 新增）** | `workflow_dispatch` 手工，或 `push` 标签 `gacha-*` | 调 `package.ps1` 出两个 zip；**tag 触发时自动建 GitHub Release 并把两个 zip 挂成资产** |
++
++所以：
++
++- **推 `main`** → 只有 `build.yml`（artifact，不发 Release）；它现在能出**配套可用**的包：C++ 启动器 +
++  `app-build.<sha>\Starward.exe` + `version.ini=build.<sha>` 正好对得上（见上一节的坑与修法）。
++- **想要 Release** → 推 `gacha-*` 标签，或手工触发 `Gacha Package`（可勾选顺便发 Release）：
++  ```bash
++  git tag gacha-0.1.0 && git push origin gacha-0.1.0
++  ```
++
++> ⚠️ **推 tag 前先在 fork 里禁用上游那三个 tag 工作流**，否则它们会同时被触发：既报一堆没密钥的失败，又可能先建出一个
++> **draft release**，而 GitHub Release 是按 tag 定位的 —— 我的发布步骤会往那个 draft 上挂资产，结果发布停在草稿态。
++> ```bash
++> gh workflow disable "Publish Preview"   --repo <owner>/<repo>
++> gh workflow disable "Publish Preview 2" --repo <owner>/<repo>
++> gh workflow disable "Publish Preview 3" --repo <owner>/<repo>
++> ```
++> 等价操作：仓库 Settings → Actions → General → 或在 Actions 列表里逐个 Disable workflow。禁用是仓库级设置，
++> **不需要改任何文件**（所以上游合并依然干净）。想改用 `v*` 之类更常规的标签，把 `gacha-package.yml` 的
++> `tags:` 加一项即可。
++
++### 坑：CI 上编出来的包为什么曾是坏的（已修）
++
++第一次在 GitHub Actions 上编出来的 artifact：启动器弹 "Starward files not found"，`Starward.GachaOnly.exe`
++双击也起不来（`0xC000027B`）。两个根因都不是 CI 的错：
++
++1. **`-p:DefineConstants=...` 是全局 MSBuild 属性，会静默盖掉项目内的赋值。**
++   `build.yml` 传了 `-p:DefineConstants=DONOT_CHECK_UPDATE`，而我在 csproj 里用
++   `<DefineConstants>$(DefineConstants);GACHA_ONLY</DefineConstants>` 追加常量 —— 项目文件对**全局**属性的赋值
++   会被忽略，`-define:` 里只剩 `DONOT_CHECK_UPDATE`。于是 `GachaOnlyProfile.Enabled` 恒为 false：编出来的是
++   "行为完全是原生 Starward、名字却叫 GachaOnly"的东西；它还会注册**上游的单实例键**，本机官方 Starward 一旦
++   开着，它启动即静默退出（"打不开"的观感）。
++   修法：开关改成 **MSBuild 生成的编译期常量**（`GenerateGachaOnlyMarker` target 写
++   `obj/…/GachaOnlyMarker.g.cs`，`GachaOnlyProfile.Enabled` 读它）。命令行全局属性盖不掉它，Release 裁剪也不会
++   把它裁掉（我先用的是 `AssemblyMetadata`，靠反射读，担心裁剪所以换掉了）。实测带
++   `-p:DefineConstants=DONOT_CHECK_UPDATE` 编译后日志仍是 `Standalone gacha build` ✔
++2. **发布配置在项目块之后导入，会把 `PublishTrimmed`/`PublishReadyToRun` 重新打开。**
++   csproj 第 13 行 `<PublishProfile>win-$(Platform).pubxml</PublishProfile>` 自动套用
++   `Properties/PublishProfiles/win-x64.pubxml`，其中写死 `PublishTrimmed=True`、`TrimMode=partial`、
++   `PublishReadyToRun=True`（Release）。我原来在 csproj 块里把这两个属性设成 false 是在**配置导入之前**，
++   于是被覆盖 → CI 上成了「trim ON + CsWinRT AOT 优化器 OFF」这个必崩组合（XAML 类型被裁掉，启动即
++   `0xC000027B`）。
++   修法：无 SDK 的机器**直接把 `PublishProfile` 清空**（并自己补 `SelfContained=true`），而不是去覆盖那两个属性；
++   有 SDK 的机器（CI、装了 VS 的开发机）走**上游原样配置**（裁剪 + 投影 + AOT 优化器全开）。
++
++顺带把 app 的 `AssemblyName` 固定成 `Starward`：上游和本 fork 的启动器都去找
++`app-<版本>\Starward.exe`，这样 CI 不加任何参数就是配套的包。`WindowsSdkAvailable` 改为**自动探测**
++（`Exists('$(WindowsSdkDir)UnionMetadata\Windows.winmd')`），也可显式 `-p:WindowsSdkAvailable=true|false` 覆盖；
++这组"机器能力"属性对 `-p:GachaOnly=false` 的原生构建同样生效，两种模式都能在本机编出来（实测：原生构建窗口标题
++`Starward`、抽卡构建标题 `Starward Gacha` 且日志有 `Standalone gacha build`）。
++
++便携包结构（和官方 `Starward_Portable_*.7z` 一样，只是按你的要求用 zip）：
++
++```
++StarwardGacha/
++    Starward.exe         启动器（读 version.ini → 起 app-<版本>\Starward.exe，透传命令行参数，
++                         并清理更新后遗留的旧 app-* 目录）
++    version.ini          version=0.1.0
++    gacha-data.ini       UserDataFolder=F:\Mihoyo\Starward（-DataFolder 决定，可删）
++    app-0.1.0/           实际应用（发布时用 -p:PortableLayout=true 把 exe 命名为 Starward.exe）
++```
++
++两个实现细节：
++
++- **启动器是 C# 写的**（`gacha-fork/launcher/`）：官方的 `src/Starward.Launcher` 是 vcxproj，需要 MSVC 工具链，
++  本机没有 cl/msbuild，所以按同样的行为重写了等价实现（单文件自包含，约 10 MB）。它不参与 `Starward.slnx`，
++  上游合并不会碰到。
++- **`PortableLayout=true`** 只在我的 csproj 隔离块里生效：把 app 项目发布成 `Starward.exe`。没有直接用命令行
++  `-p:AssemblyName=Starward`，那是全局属性，会把所有被引用项目一起改名（NuGet 会报 `Ambiguous project name`）。
++
++顺手修掉的一个真 bug：便携版里配置在包根目录、而进程工作目录是 `app-0.1.0\`，原先只查 exe 同级目录，
++所以 `gacha-data.ini` 会被忽略（日志显示 "resolved from probe"）。现在 `GachaOnlyDataFolder` 会同时查
++`app-<版本>` 的上一级目录 ✔（实测日志变为 "resolved from config file gacha-data.ini"）。
++
++---
++
++## 9. 验证记录
++
++1. `dotnet build -c Debug -p:GachaOnly=true`：`Starward.Language / Starward.Core / Starward.Setup.Core /
++   Starward.RPC / Starward` 全部通过，产出 `Starward.GachaOnly.dll`。
++2. `build.ps1 -Version 0.1.0 -DataFolder F:\Mihoyo\Starward`：Release 自包含打包成功，
++   产出 `Starward.GachaOnly.exe` + `gacha-data.ini`（270.5 MB / 937 文件）。
++3. 实机运行（Debug 与 Release 两个产物都跑过）：日志
++   `Standalone gacha build; user data folder: F:\Mihoyo\Starward (resolved from config file gacha-data.ini)`。
++4. 界面（`out/gacha-app.png`、`out/gacha-app-printwindow.png`、`out/gacha-app-release.png`）：
++   导航栏只剩「抽卡记录」与设置齿轮，左上角游戏切换器保留，主页面为完整祈愿记录
++   （常驻/角色活动/武器活动三栏统计、5★/4★ 明细、uid 选择、更新/删除/导出/UIGF 全部在），
++   共用数据目录里的 1120 / 5453 / 1348 条记录正常显示。
++5. 图片导出（本次新增功能）：
++   - 原神 → `2415×4000`（布局 1600×2650，1.51×，3.81 MB）；星铁 → `3010×4000`（1600×2126，1.88×，3.5 MB）；
++     绝区零（该账号无记录）→ 退出码 1、不产生文件；
++   - 版式：单页（一个页头 + 双列瀑布 + 一个页脚），武器池在常驻池上方、群星跃迁沉到最下，
++     无接缝、无重复页头、无右侧裁切（布局日志 `card=1600x2650 body=1542x2490 columnWidths=[763,763]`）；
++   - 武器池已带 8 项指标：`flips=19 wins=14 avgUp=54.2` → 小保底不歪 **73.7%**、UP 平均 54.2 抽、UP 花费 8665 原石；
++   - 角色池指标与参考图（另一工具、同一批记录）交叉核对一致：五星平均 60.2 抽、小保底不歪 45.8%、
++     最非 82 抽、UP 平均 93.4 抽、UP 花费 1.49w 原石、最欧 1 抽（参考图：45.3% / 93 抽 / 1.49w / 1 抽）。
++6. 窗口限制移除：`MainWindow` 的 `OverlappedPresenter.IsResizable/IsMaximizable` 实测为 True，
++   窗口样式含 `WS_THICKFRAME` / `WS_MAXIMIZEBOX`（可拖边缩放、可点最大化），
++   日志 `[GachaOnly] window presenter: resizable=True maximizable=True`。
++   **最大化按钮修复**：上游在 `WindowSubclassProc` 里无条件吞掉 `SC_MAXIMIZE`（规避"双击标题栏最大化"的
++   WinAppSDK bug），导致最大化按钮、贴靠布局点击、`Win+↑` 全部无效（鼠标悬停仍会弹出 Win11 的快捷布局
++   浮窗，看起来像"按钮坏了"）。现在只在 stock 构建里吞，GachaOnly 放行；实测真实点击最大化按钮后
++   窗口变 `2576×1408`、日志 `state=Maximized`。
++7. 数量统计导出：原神 `3200×3604`（6.35 MB）、星铁 `3200×2596`（4.98 MB），排序与角色/武器分组逐项核对通过。
++8. 数据库热备份：`tools/db_backup.py` 用 SQLite 在线备份 API（避免裸拷 WAL 的不一致），
++   备份落在 `backup/<时间戳>-<名称>/`，附 `integrity_check=ok` 与各抽卡表行数：
++   `GenshinGachaItem=10088`、`StarRailGachaItem=6195`、`ZZZGachaItem=0`。
++9. 补丁面：`git log` = 1 个 pristine 基线 + 1 个 fork 提交（相对上游约 +2500 行，
++   其中上游文件 10 个、每处 1~6 行）。
++10. 打包：`package.ps1` 产出的便携包解压后直接运行启动器
++    `Starward.exe --export-gacha-image out.png --game hk4e_cn` → 导出成功（2415×4000），
++    日志确认数据目录来自包内 `gacha-data.ini`；源码包 899 项、0 个构建产物。
++
++---
++
++## 10. 工具
++
++| 脚本 | 用途 |
++|---|---|
++| `build.ps1` | 打包（默认 GachaOnly，`-Stock` 编原生 Starward） |
++| `package.ps1` | 打包源码包与便携包（见第 8 节，含启动器与 zip 产出） |
++| `launcher/` | 便携包启动器（C# 等价实现，单文件自包含） |
++| `sync-upstream.ps1` | rebase/merge 上游，列出补丁面与冲突文件 |
++| `tools/db_backup.py` | Starward 家族数据库热备份 + 抽卡表统计（`--src <目录> --label <名称>`） |
++| `tools/screenshot.ps1` | 截取窗口用于验收。用 `PrintWindow(PW_RENDERFULLCONTENT)`，所以即使被游戏/IDE 挡在前面也能截到窗口本身（用 `CopyFromScreen` 会截到最上层窗口）。**注意**：本机执行策略禁止直接运行 .ps1，需 `powershell.exe -ExecutionPolicy Bypass -File tools\screenshot.ps1 ...` 或在会话内联执行 |
++
++---
++
++## 11. 仍未处理 / 需要决策
++
++- `CloseWindowOption=Hide` 时关窗仍会最小化到托盘（只禁用了 `--hide` 启动分支）。想彻底不要托盘，
++  需要在 `MainWindow`/`SystemTrayWindow` 里再挂钩。
++- 启动器/截图/工具箱/账号记录等页面仍在程序里（只是不可达），符合「不在意体积」的取舍；
++  将来若要瘦身，是「在 `GachaOnlyProfile` 开关下逐目录裁剪」，不必重写。
++- 未改名命名空间、未改 `RootNamespace`，所以日志/异常里的类型名仍是 `Starward.*`（刻意为之，利于合并）。
++- 若要对外发布：需保留上游 MIT 许可与署名，并按自己的版本号管理（本 fork 已禁用上游更新检查）。
+diff --git a/gacha-fork/build.ps1 b/gacha-fork/build.ps1
+new file mode 100644
+index 0000000..b9e8928
+--- /dev/null
++++ b/gacha-fork/build.ps1
+@@ -0,0 +1,86 @@
++# GachaOnly fork — build the standalone gacha app from this source tree.
++#
++#   .\build.ps1                                   # Debug-free Release publish, x64
++#   .\build.ps1 -Architecture arm64 -Version 0.2.0
++#   .\build.ps1 -DataFolder 'D:\Starward'         # point the app at a specific data folder
++#   .\build.ps1 -Stock                             # build plain upstream Starward instead
++#
++# Output: <repo>\gacha-fork\out\StarwardGacha-<Version>-<Architecture>\
++#         Starward.GachaOnly.exe + gacha-data.ini (shared user data folder)
++
++param(
++    [string] $Configuration = 'Release',
++    [ValidateSet('x64', 'x86', 'arm64')]
++    [string] $Architecture = 'x64',
++    [string] $Version = '0.1.0',
++    [string] $Output,
++    [string] $DataFolder,
++    [switch] $Stock,
++    [switch] $UseWindowsSdk,
++    [switch] $NoRestore
++)
++
++$ErrorActionPreference = 'Stop'
++$repo = Split-Path -Parent $PSScriptRoot
++
++# The .NET SDK lives outside PATH on this machine (dotnet.exe found no SDK by default).
++$dotnet = 'E:\A-Dev\deepseek-harness\.dotnet\dotnet.exe'
++if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
++$env:DOTNET_ROOT = Split-Path -Parent $dotnet
++$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
++$env:DOTNET_NOLOGO = '1'
++
++if (-not $Output) { $Output = Join-Path $PSScriptRoot "out\StarwardGacha-$Version-$Architecture" }
++$runtime = "win-$Architecture"
++
++$props = @("-p:Platform=$Architecture", "-p:Version=$Version", "-p:GachaOnly=$((-not $Stock).ToString().ToLower())")
++if ($UseWindowsSdk) {
++    $props += '-p:WindowsSdkAvailable=true'
++}
++else {
++    # No Windows SDK on this machine: the CsWinRT projection / AOT optimizer steps cannot run, and a
++    # trimmed Release build then dies at XAML startup (0xC000027B). Turn trimming and R2R off.
++    # Command line beats the publish profile, which is what sets PublishTrimmed/PublishReadyToRun.
++    $props += '-p:PublishTrimmed=false'
++    $props += '-p:PublishReadyToRun=false'
++}
++if ($NoRestore) { $props += '--no-restore' }
++
++Write-Host "dotnet      : $dotnet"
++Write-Host "runtime     : $runtime   configuration: $Configuration"
++Write-Host "variant     : $(if ($Stock) { 'stock Starward (GachaOnly=false)' } else { 'GachaOnly (GachaOnly=true)' })"
++Write-Host "output      : $Output"
++Write-Host ''
++
++& $dotnet publish (Join-Path $repo 'src\Starward\Starward.csproj') `
++    -c $Configuration -r $runtime -o $Output @props
++if ($LASTEXITCODE -ne 0) { throw "publish failed with exit code $LASTEXITCODE" }
++
++if (-not $Stock) {
++    $ini = Join-Path $Output 'gacha-data.ini'
++    if ($DataFolder) {
++        $lines = @(
++            '; Starward Gacha - shared user data folder (holds StarwardDatabase.db).'
++            '; resolution order: --data-folder > STARWARD_GACHA_DATA_FOLDER env var > this file > auto probe.'
++            "UserDataFolder=$DataFolder"
++        )
++        Write-Host "data folder : $DataFolder   (written to $ini)"
++    }
++    else {
++        $lines = @(
++            '; Starward Gacha - shared user data folder (holds StarwardDatabase.db).'
++            '; leave the value empty to auto-detect a Starward-family data folder, or set it explicitly,'
++            '; for example:  UserDataFolder=D:\Starward'
++            'UserDataFolder='
++        )
++        Write-Host 'data folder : auto-detect'
++    }
++    # ASCII + no BOM: keeps the file readable whatever writes/reads it next
++    [System.IO.File]::WriteAllLines($ini, $lines, (New-Object System.Text.UTF8Encoding($false)))
++}
++
++$exe = Get-ChildItem $Output -Filter '*.exe' | Where-Object { $_.Name -like 'Starward*' } | Select-Object -First 1
++if ($exe) {
++    Write-Host ''
++    Write-Host "built: $($exe.FullName)  ($([math]::Round($exe.Length / 1MB, 2)) MB)"
++}
+diff --git a/gacha-fork/launcher/Program.cs b/gacha-fork/launcher/Program.cs
+new file mode 100644
+index 0000000..8c3fd4a
+--- /dev/null
++++ b/gacha-fork/launcher/Program.cs
+@@ -0,0 +1,114 @@
++// GachaOnly fork — portable-package launcher.
++//
++// Mirrors upstream's src/Starward.Launcher (C++): read version.ini, start
++// app-<version>\Starward.exe with the same command line, then delete any other app-* folder that an
++// in-place update left behind. The C++ project cannot be built on a machine without the MSVC
++// toolchain, hence this equivalent.
++//
++// Not part of Starward.slnx, so upstream merges never see it.
++
++using System.Diagnostics;
++using System.Runtime.InteropServices;
++
++const uint MB_OKCANCEL = 0x00000001;
++const uint MB_ICONWARNING = 0x00000030;
++const int IDOK = 1;
++
++[DllImport("user32.dll", CharSet = CharSet.Unicode)]
++static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
++
++[DllImport("user32.dll")]
++static extern bool SetProcessDPIAware();
++
++[DllImport("shell32.dll", CharSet = CharSet.Unicode)]
++static extern IntPtr ShellExecuteW(IntPtr hwnd, string? op, string file, string? parameters, string? directory, int showCmd);
++
++string baseFolder = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory)!;
++string? runExe = null;
++
++// 1) version.ini -> app-<version>\Starward.exe
++string versionFile = Path.Combine(baseFolder, "version.ini");
++if (File.Exists(versionFile))
++{
++    string? version = ReadIniValue(versionFile, "version");
++    if (!string.IsNullOrWhiteSpace(version))
++    {
++        string candidate = Path.Combine(baseFolder, "app-" + version, "Starward.exe");
++        if (File.Exists(candidate))
++        {
++            runExe = candidate;
++        }
++    }
++}
++
++// 2) otherwise the newest Starward*.exe under any app-* folder — a packaged build ships
++//    app-<version>\Starward.exe, a development one Starward.GachaOnly.exe
++if (runExe is null)
++{
++    runExe = Directory.EnumerateDirectories(baseFolder, "app-*")
++                     .SelectMany(dir => Directory.EnumerateFiles(dir, "Starward*.exe"))
++                     .Where(file => Path.GetFileName(file) is "Starward.exe" or "Starward.GachaOnly.exe")
++                     .OrderByDescending(File.GetLastWriteTimeUtc)
++                     .FirstOrDefault();
++}
++
++if (runExe is not null)
++{
++    var startInfo = new ProcessStartInfo
++    {
++        FileName = runExe,
++        WorkingDirectory = Path.GetDirectoryName(runExe)!,
++        UseShellExecute = false,
++    };
++    foreach (string arg in Environment.GetCommandLineArgs().Skip(1))
++    {
++        startInfo.ArgumentList.Add(arg);
++    }
++    Process.Start(startInfo);
++
++    // drop the app folders an in-place update superseded
++    string current = Path.GetFileName(Path.GetDirectoryName(runExe)!);
++    foreach (string dir in Directory.EnumerateDirectories(baseFolder, "app-*"))
++    {
++        if (!string.Equals(Path.GetFileName(dir), current, StringComparison.OrdinalIgnoreCase))
++        {
++            try
++            {
++                Directory.Delete(dir, true);
++            }
++            catch (Exception)
++            {
++                // a running or read-only folder is not worth failing the launch over
++            }
++        }
++    }
++}
++else
++{
++    SetProcessDPIAware();
++    const string url = "https://github.com/Scighost/Starward";
++    int choice = MessageBoxW(IntPtr.Zero,
++                             $"Starward files not found.\r\nWould you like to visit the project page?\r\n{url}",
++                             "Starward Gacha",
++                             MB_ICONWARNING | MB_OKCANCEL);
++    if (choice == IDOK)
++    {
++        ShellExecuteW(IntPtr.Zero, null, url, null, null, 1);
++    }
++}
++
++
++static string? ReadIniValue(string path, string key)
++{
++    // version.ini only ever holds one global key, so a full INI parser is not needed
++    foreach (string raw in File.ReadAllLines(path))
++    {
++        string line = raw.Trim();
++        int separator = line.IndexOf('=');
++        if (separator > 0 && line[..separator].Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
++        {
++            return line[(separator + 1)..].Trim();
++        }
++    }
++    return null;
++}
+diff --git a/gacha-fork/launcher/StarwardGacha.Launcher.csproj b/gacha-fork/launcher/StarwardGacha.Launcher.csproj
+new file mode 100644
+index 0000000..60fa14d
+--- /dev/null
++++ b/gacha-fork/launcher/StarwardGacha.Launcher.csproj
+@@ -0,0 +1,32 @@
++<Project Sdk="Microsoft.NET.Sdk">
++
++  <!--  GachaOnly fork: portable-package launcher, the C# equivalent of upstream's
++        src/Starward.Launcher (C++). It exists so the release keeps the same shape as Starward's
++        own portable package:
++
++            Starward.exe     <- this launcher
++            version.ini      <- version=<version>
++            app-<version>\   <- the actual app (published with -p:AssemblyName=Starward)
++
++        The upstream launcher is a vcxproj and needs the MSVC toolchain, which the build machine
++        does not have, so the behaviour is reimplemented here.  -->
++
++  <PropertyGroup>
++    <OutputType>WinExe</OutputType>
++    <TargetFramework>net10.0</TargetFramework>
++    <Nullable>enable</Nullable>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <AssemblyName>Starward</AssemblyName>
++    <RootNamespace>Starward.Launcher</RootNamespace>
++    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
++    <SelfContained>true</SelfContained>
++    <PublishSingleFile>true</PublishSingleFile>
++    <!-- the launcher is plain BCL code, so trimming is safe here (unlike the XAML app) -->
++    <PublishTrimmed>true</PublishTrimmed>
++    <PublishReadyToRun>false</PublishReadyToRun>
++    <InvariantGlobalization>true</InvariantGlobalization>
++    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
++    <DebugType>none</DebugType>
++  </PropertyGroup>
++
++</Project>
+diff --git a/gacha-fork/package.ps1 b/gacha-fork/package.ps1
+new file mode 100644
+index 0000000..6823715
+--- /dev/null
++++ b/gacha-fork/package.ps1
+@@ -0,0 +1,140 @@
++# GachaOnly fork — package the source tree and the portable release.
++#
++#   .\package.ps1 -Version 0.1.0                     # both archives
++#   .\package.ps1 -Version 0.1.0 -DataFolder 'F:\Mihoyo\Starward'
++#   .\package.ps1 -Version 0.1.0 -SkipBuild -SkipSource
++#
++# The release archive keeps the layout of Starward's own portable package:
++#
++#   StarwardGacha/
++#       Starward.exe          launcher (gacha-fork/launcher, the C# equivalent of upstream's C++ one)
++#       version.ini           version=<version>
++#       app-<version>/        the published app (AssemblyName forced to Starward, as upstream does)
++#       gacha-data.ini        only when -DataFolder is given (shared data folder, see README §3)
++#
++# Output: gacha-fork/dist/
++#   StarwardGacha_Portable_<version>_x64.zip
++#   StarwardGacha_Source_<version>.zip
++#
++# Note: this machine's execution policy refuses to run .ps1 directly, so invoke it as
++#   powershell.exe -ExecutionPolicy Bypass -File gacha-fork\package.ps1 -Version 0.1.0
++
++param(
++    [Parameter(Mandatory = $true)][string] $Version,
++    [string] $Architecture = 'x64',
++    [string] $DataFolder = '',
++    [switch] $SkipBuild,
++    [switch] $SkipSource
++)
++
++$ErrorActionPreference = 'Stop'
++$forkRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
++$repoRoot = Split-Path -Parent $forkRoot
++$dist = Join-Path $forkRoot 'dist'
++$stage = Join-Path $dist 'stage'
++$packageName = 'StarwardGacha'
++$packageRoot = Join-Path $stage $packageName
++$appFolder = Join-Path $packageRoot "app-$Version"
++$dotnet = if ($env:DOTNET_ROOT) { Join-Path $env:DOTNET_ROOT 'dotnet.exe' } else { 'dotnet' }
++
++if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
++
++Write-Output "[1/5] cleaning stage"
++if (-not $SkipBuild) {
++    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
++    New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
++
++    Write-Output "[2/5] launcher -> $packageRoot\Starward.exe"
++    & $dotnet publish (Join-Path $forkRoot 'launcher\StarwardGacha.Launcher.csproj') `
++        -c Release -r "win-$Architecture" -o (Join-Path $stage 'launcher') `
++        -p:Version=$Version -v m
++    if ($LASTEXITCODE -ne 0) { throw 'launcher publish failed' }
++    Move-Item (Join-Path $stage 'launcher\Starward.exe') (Join-Path $packageRoot 'Starward.exe') -Force
++    Remove-Item (Join-Path $stage 'launcher') -Recurse -Force
++
++    Write-Output "[3/5] app -> $appFolder"
++    # The app project already publishes as app-<version>\Starward.exe when GachaOnly is on (see the
++    # AssemblyName note in Starward.csproj), which is the name both this fork's launcher and
++    # upstream's C++ launcher start. Trimming/ReadyToRun are decided by the project as well.
++    & $dotnet publish (Join-Path $repoRoot 'src\Starward\Starward.csproj') `
++        -c Release -r "win-$Architecture" -p:Platform=$Architecture -p:Version=$Version `
++        -p:GachaOnly=true -o $appFolder -v m
++    if ($LASTEXITCODE -ne 0) { throw 'app publish failed' }
++
++    Write-Output "[4/5] version.ini"
++    Set-Content -Path (Join-Path $packageRoot 'version.ini') -Value "version=$Version" -Encoding ascii
++    if ($DataFolder) {
++        Set-Content -Path (Join-Path $packageRoot 'gacha-data.ini') -Value "UserDataFolder=$DataFolder" -Encoding ascii
++    }
++}
++else {
++    Write-Output "[1/5..4/5] build skipped"
++}
++
++Write-Output "[5/5] archives"
++New-Item -ItemType Directory -Path $dist -Force | Out-Null
++
++# --- portable package -------------------------------------------------------------------------
++if (Test-Path (Join-Path $packageRoot 'Starward.exe')) {
++    $portableArchive = Join-Path $dist "StarwardGacha_Portable_${Version}_$Architecture.zip"
++    Remove-Item $portableArchive -Force -ErrorAction SilentlyContinue
++    Push-Location $stage
++    try { tar -c -a -f $portableArchive $packageName } finally { Pop-Location }
++}
++else {
++    Write-Output '  portable package skipped (no stage; run without -SkipBuild)'
++}
++
++# --- source package ---------------------------------------------------------------------------
++# The tracked tree (upstream + the fork's code changes) plus the fork folder itself, which is kept
++# out of git on purpose. Build output (dist/out/backup/bin/obj) never goes in.
++if (-not $SkipSource) {
++    $sourceArchive = Join-Path $dist "StarwardGacha_Source_$Version.zip"
++    Remove-Item $sourceArchive -Force -ErrorAction SilentlyContinue
++    $sourceStage = Join-Path $dist 'srcstage'
++    if (Test-Path $sourceStage) { Remove-Item $sourceStage -Recurse -Force }
++    New-Item -ItemType Directory -Path $sourceStage -Force | Out-Null
++
++    git -C $repoRoot archive --format=zip -o (Join-Path $dist 'tracked.zip') HEAD
++    if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
++    Expand-Archive -Path (Join-Path $dist 'tracked.zip') -DestinationPath $sourceStage -Force
++    Remove-Item (Join-Path $dist 'tracked.zip') -Force
++
++    $forkTarget = Join-Path $sourceStage 'gacha-fork'
++    New-Item -ItemType Directory -Path $forkTarget -Force | Out-Null
++    foreach ($item in 'README.md', 'build.ps1', 'package.ps1', 'sync-upstream.ps1', 'tools', 'gacha-only.patch', 'gacha-only.diff') {
++        $source = Join-Path $forkRoot $item
++        if (Test-Path $source) { Copy-Item $source -Destination $forkTarget -Recurse -Force }
++    }
++    # the launcher project: sources only, never its build output
++    $launcherSource = Join-Path $forkRoot 'launcher'
++    if (Test-Path $launcherSource) {
++        $launcherTarget = Join-Path $forkTarget 'launcher'
++        New-Item -ItemType Directory -Path $launcherTarget -Force | Out-Null
++        Copy-Item (Join-Path $launcherSource '*.*') -Destination $launcherTarget -Force
++    }
++    # belt and braces: nothing built ever ships in the source package
++    Get-ChildItem $sourceStage -Recurse -Directory | Where-Object { $_.Name -in 'bin', 'obj' } |
++        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
++
++    # The archive should read as "Starward Gacha", not as a stock Starward drop: the package README
++    # becomes the entry point and upstream's own README is kept beside it.
++    $upstreamReadme = Join-Path $sourceStage 'README.md'
++    if (Test-Path $upstreamReadme) {
++        Move-Item $upstreamReadme (Join-Path $sourceStage 'README.upstream.md') -Force
++    }
++    $packageReadme = Join-Path $forkRoot 'PACKAGE-README.md'
++    if (Test-Path $packageReadme) {
++        Copy-Item $packageReadme (Join-Path $sourceStage 'README.md') -Force
++    }
++
++    Push-Location $sourceStage
++    try { tar -c -a -f $sourceArchive (Get-ChildItem $sourceStage | Select-Object -ExpandProperty Name) } finally { Pop-Location }
++    Remove-Item $sourceStage -Recurse -Force
++}
++
++Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
++
++Get-ChildItem $dist -File | ForEach-Object {
++    Write-Output ("  {0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB))
++}
+diff --git a/gacha-fork/sync-upstream.ps1 b/gacha-fork/sync-upstream.ps1
+new file mode 100644
+index 0000000..adaad36
+--- /dev/null
++++ b/gacha-fork/sync-upstream.ps1
+@@ -0,0 +1,71 @@
++# Sync this fork with upstream Starward.
++#
++#   .\sync-upstream.ps1              # fetch + rebase the fork commit(s) onto upstream/main
++#   .\sync-upstream.ps1 -Merge       # same, but merge instead of rebase
++#   .\sync-upstream.ps1 -Check       # only show what would conflict (no history rewrite)
++#
++# The whole fork is meant to stay a thin patch on top of upstream:
++#   6 upstream files with one hook line each, everything else in new files
++#   (src/Starward/Features/GachaOnly/**, src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs).
++# If upstream touches those hook lines, the conflict is one or two lines wide.
++
++param(
++    [string] $UpstreamUrl = 'https://github.com/Scighost/Starward.git',
++    [string] $Branch = 'main',
++    [switch] $Merge,
++    [switch] $Check
++)
++
++$ErrorActionPreference = 'Stop'
++$repo = Split-Path -Parent $PSScriptRoot
++Push-Location $repo
++try {
++    $remotes = git remote
++    if ($remotes -notcontains 'upstream') {
++        Write-Host "adding remote upstream -> $UpstreamUrl"
++        git remote add upstream $UpstreamUrl
++    }
++
++    Write-Host 'fetching upstream...'
++    git fetch upstream $Branch --tags
++    if ($LASTEXITCODE -ne 0) { throw 'git fetch failed (no network access to GitHub?)' }
++
++    $ahead = (git rev-list --count "upstream/$Branch..HEAD")
++    $behind = (git rev-list --count "HEAD..upstream/$Branch")
++    Write-Host "fork is $ahead commit(s) ahead, $behind commit(s) behind upstream/$Branch"
++    if ($ahead -eq 0) { Write-Warning 'fork has no own commits: nothing to sync' }
++
++    Write-Host ''
++    Write-Host 'files this fork patches (the only places a conflict can appear):'
++    git diff --name-status "upstream/$Branch...HEAD" -- src | ForEach-Object { "  $_" }
++
++    if ($Check) {
++        Write-Host ''
++        Write-Host 'dry run (git merge-tree):'
++        git merge-tree --write-tree "upstream/$Branch" HEAD | Select-Object -First 40
++        return
++    }
++
++    Write-Host ''
++    if ($Merge) {
++        Write-Host "merging upstream/$Branch into the fork..."
++        git merge "upstream/$Branch"
++    }
++    else {
++        Write-Host "rebasing the fork commit(s) onto upstream/$Branch..."
++        git rebase "upstream/$Branch"
++    }
++
++    if ($LASTEXITCODE -ne 0) {
++        Write-Warning 'conflicts need resolving, then run:  git rebase --continue   (or git merge --continue)'
++        git diff --name-only --diff-filter=U | ForEach-Object { "  conflict: $_" }
++        Write-Host ''
++        Write-Host 'reminder: never rename namespaces/files or move Features/Gacha/** — that is what keeps this cheap.'
++        return
++    }
++
++    Write-Host 'synced. now rebuild:  .\build.ps1 -DataFolder <your data folder>'
++}
++finally {
++    Pop-Location
++}
+diff --git a/gacha-fork/tools/check_weapon_pool.py b/gacha-fork/tools/check_weapon_pool.py
+new file mode 100644
+index 0000000..3aaead9
+--- /dev/null
++++ b/gacha-fork/tools/check_weapon_pool.py
+@@ -0,0 +1,58 @@
++import sqlite3
++import sys
++
++db = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\tang\AppData\Local\MihoyoWishBook\StarwardDatabase.db"
++out = sys.argv[2] if len(sys.argv) > 2 else "weapon-check.txt"
++c = sqlite3.connect(db)
++
++STANDARD_WEAPONS = {
++    "天空之刃", "天空之傲", "天空之翼", "天空之卷", "天空之脊",
++    "狼的末路", "四风原典", "阿莫斯之弓", "和璞鸢", "风鹰剑",
++}
++STANDARD_CHARS = {"迪卢克", "琴", "莫娜", "七七", "刻晴", "提纳里", "迪希雅", "梦见月瑞希"}
++STANDARD = STANDARD_WEAPONS | STANDARD_CHARS
++
++lines = []
++
++
++def five(uid, gtype):
++    return c.execute(
++        "SELECT Id, Name FROM GenshinGachaItem WHERE Uid=? AND RankType=5 AND GachaType=? ORDER BY Id;",
++        (uid, gtype),
++    ).fetchall()
++
++
++def report(seq, standard, label):
++    off = [n for _, n in seq if n in standard]
++    flips = wins = 0
++    prev_up = None
++    for _, n in seq:
++        up = n not in standard
++        if prev_up is None or prev_up is True:
++            flips += 1
++            if up:
++                wins += 1
++        prev_up = up
++    lines.append(f"{label}: n={len(seq)} up={len(seq) - len(off)} off={len(off)} "
++                 f"flips={flips} wins={wins} rate={(wins / flips if flips else 0):.1%}")
++    lines.append(f"    off-banner items: {off}")
++
++
++uid = 110369802
++perm = five(uid, 200)
++derived = {n for _, n in perm}
++lines.append(f"permanent 5★ distinct ({len(derived)}): {sorted(derived)}")
++lines.append(f"standard weapons missing from the permanent pull list: {sorted(STANDARD_WEAPONS - derived)}")
++lines.append("")
++
++weapon = five(uid, 302)
++report(weapon, STANDARD, "weapon banner / hardcoded standard pool")
++report(weapon, derived, "weapon banner / pool derived from permanent pulls")
++lines.append("")
++chars = five(uid, 301)
++report(chars, STANDARD_CHARS, "character banner / hardcoded standard characters")
++report(chars, derived, "character banner / pool derived from permanent pulls")
++
++with open(out, "w", encoding="utf-8") as fh:
++    fh.write("\n".join(lines) + "\n")
++print("written", out)
+diff --git a/gacha-fork/tools/check_weapon_up.py b/gacha-fork/tools/check_weapon_up.py
+new file mode 100644
+index 0000000..d2085b5
+--- /dev/null
++++ b/gacha-fork/tools/check_weapon_up.py
+@@ -0,0 +1,42 @@
++import sqlite3
++import sys
++
++db = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\tang\AppData\Local\MihoyoWishBook\StarwardDatabase.db"
++c = sqlite3.connect(db)
++
++
++def five(uid, gtype):
++    return c.execute(
++        "SELECT Id, Name FROM GenshinGachaItem WHERE Uid=? AND RankType=5 AND GachaType=? ORDER BY Id;",
++        (uid, gtype),
++    ).fetchall()
++
++
++uid = 110369802
++perm = five(uid, 200)
++char = five(uid, 301)
++weapon = five(uid, 302)
++standard = {n for _, n in perm}
++print("permanent 5★ pool (%d):" % len(standard), sorted(standard))
++print()
++print("weapon banner 5★ (%d):" % len(weapon))
++for _, n in weapon:
++    print(f"   {'UP ' if n not in standard else 'off'}  {n}")
++
++
++def rate(seq, standard_set, label):
++    flips = wins = 0
++    prev_up = None
++    for _, n in seq:
++        up = n not in standard_set
++        if prev_up is None or prev_up is True:
++            flips += 1
++            if up:
++                wins += 1
++        prev_up = up
++    print(f"{label}: n={len(seq)} up={sum(1 for _, n in seq if n not in standard_set)} flips={flips} wins={wins} "
++          f"rate={(wins / flips) if flips else 0:.1%}")
++
++
++rate(weapon, standard, "weapon banner (standard pool from permanent)")
++rate(char, standard, "character banner (same standard-pool rule, for reference)")
+diff --git a/gacha-fork/tools/db_backup.py b/gacha-fork/tools/db_backup.py
+new file mode 100644
+index 0000000..4319d26
+--- /dev/null
++++ b/gacha-fork/tools/db_backup.py
+@@ -0,0 +1,161 @@
++#!/usr/bin/env python3
++"""Hot backup + inspect for Starward-family SQLite databases.
++
++Why not a plain file copy: Starward runs the DB in WAL mode with a live writer.
++Copying .db/.db-wal/.db-shm by hand can capture a torn tail. This tool uses
++sqlite3's online backup API, which is the supported way to snapshot a live DB.
++
++Usage:
++  python db_backup.py --src "<user data folder>" --label <name>
++  python db_backup.py --src "<user data folder>" --label <name> --inspect-only
++  python db_backup.py --src "<user data folder>" --compare "<other folder>"
++"""
++
++from __future__ import annotations
++
++import argparse
++import datetime as dt
++import os
++import shutil
++import sqlite3
++import sys
++
++DB_NAME = "StarwardDatabase.db"
++
++GACHA_TABLES = [
++    "GenshinGachaItem",
++    "StarRailGachaItem",
++    "ZZZGachaItem",
++    "GenshinBeyondGachaItem",
++    "GachaLogUrl",
++    "GenshinGachaInfo",
++    "StarRailGachaInfo",
++    "ZZZGachaInfo",
++    "GenshinBeyondGachaInfo",
++]
++
++
++def connect_rw(db_path: str) -> sqlite3.Connection:
++    """Open the live DB read-write (as the app itself does) so WAL is readable."""
++    con = sqlite3.connect(db_path, timeout=15.0)
++    con.execute("PRAGMA busy_timeout = 15000;")
++    return con
++
++
++def table_counts(con: sqlite3.Connection) -> dict[str, int]:
++    have = {
++        row[0]
++        for row in con.execute("SELECT name FROM sqlite_master WHERE type='table';")
++    }
++    out: dict[str, int] = {}
++    for t in GACHA_TABLES:
++        if t in have:
++            out[t] = con.execute(f"SELECT COUNT(*) FROM {t};").fetchone()[0]
++    return out
++
++
++def gacha_summary(con: sqlite3.Connection) -> str:
++    have = {
++        row[0]
++        for row in con.execute("SELECT name FROM sqlite_master WHERE type='table';")
++    }
++    lines: list[str] = []
++    for t in GACHA_TABLES:
++        if t not in have:
++            continue
++        n = con.execute(f"SELECT COUNT(*) FROM {t};").fetchone()[0]
++        extra = ""
++        if t.endswith("GachaItem"):
++            try:
++                uids = con.execute(
++                    f"SELECT COUNT(DISTINCT Uid), MIN(Time), MAX(Time) FROM {t};"
++                ).fetchone()
++                extra = f"  uids={uids[0]}  {uids[1]} .. {uids[2]}"
++            except sqlite3.Error:
++                pass
++        lines.append(f"  {t:<28} {n:>8}{extra}")
++    ver = con.execute("PRAGMA USER_VERSION;").fetchone()[0]
++    lines.insert(0, f"  schema USER_VERSION = {ver}")
++    return "\n".join(lines)
++
++
++def do_backup(src_folder: str, label: str, out_root: str) -> str:
++    db = os.path.join(src_folder, DB_NAME)
++    if not os.path.isfile(db):
++        raise SystemExit(f"no database at {db}")
++
++    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
++    out_dir = os.path.join(out_root, f"{stamp}-{label}")
++    os.makedirs(out_dir, exist_ok=True)
++    dst = os.path.join(out_dir, DB_NAME)
++
++    src = connect_rw(db)
++    try:
++        src.execute("PRAGMA wal_checkpoint(PASSIVE);")
++    except sqlite3.Error:
++        pass
++    dst_con = sqlite3.connect(dst)
++    try:
++        src.backup(dst_con)
++    finally:
++        dst_con.close()
++        src.close()
++
++    # side files the app may also need (config.ini holds UserDataFolder)
++    for extra in ("config.ini", "version.ini", "StarwardDatabase.db-wal", "StarwardDatabase.db-shm"):
++        p = os.path.join(src_folder, extra)
++        if os.path.isfile(p):
++            try:
++                shutil.copy2(p, os.path.join(out_dir, extra))
++            except OSError as ex:
++                print(f"  (skip {extra}: {ex})")
++
++    chk = sqlite3.connect(dst)
++    try:
++        integrity = chk.execute("PRAGMA integrity_check;").fetchone()[0]
++        counts = table_counts(chk)
++    finally:
++        chk.close()
++
++    size = os.path.getsize(dst)
++    print(f"backup -> {dst}  ({size/1024/1024:.2f} MB)")
++    print(f"  integrity_check = {integrity}")
++    if counts:
++        print("  rows: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
++    return dst
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--src", help="user data folder (holds StarwardDatabase.db)")
++    ap.add_argument("--label", default="starward")
++    ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backup"))
++    ap.add_argument("--inspect-only", action="store_true")
++    ap.add_argument("--compare", help="second user data folder to compare against")
++    args = ap.parse_args()
++
++    if args.src:
++        src_db = os.path.join(args.src, DB_NAME)
++        con = connect_rw(src_db)
++        print(f"=== {args.label}: {args.src} ===")
++        try:
++            print(gacha_summary(con))
++        finally:
++            con.close()
++        if not args.inspect_only:
++            do_backup(args.src, args.label, os.path.abspath(args.out))
++
++    if args.compare:
++        other = os.path.join(args.compare, DB_NAME)
++        con = connect_rw(other)
++        print(f"=== compare: {args.compare} ===")
++        try:
++            print(gacha_summary(con))
++        finally:
++            con.close()
++
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/gacha-fork/tools/screenshot.ps1 b/gacha-fork/tools/screenshot.ps1
+new file mode 100644
+index 0000000..3f6e451
+--- /dev/null
++++ b/gacha-fork/tools/screenshot.ps1
+@@ -0,0 +1,75 @@
++# Capture a screenshot of a process' main window (verification helper for the GachaOnly build).
++#
++#   .\screenshot.ps1 -ProcessName Starward.GachaOnly -Out shot.png
++#
++# Uses PrintWindow(PW_RENDERFULLCONTENT) so the capture also works while another window (a game,
++# an IDE) is in the foreground — CopyFromScreen would grab whatever is on top instead.
++# Falls back to a straight screen capture if PrintWindow returns a blank image.
++#
++# Note: this machine's execution policy refuses to run .ps1 files; invoke it from a session where
++# scripts are allowed, or paste the body inline.
++
++param(
++    [Parameter(Mandatory = $true)][string] $ProcessName,
++    [Parameter(Mandatory = $true)][string] $Out
++)
++
++$ErrorActionPreference = 'Stop'
++Add-Type -AssemblyName System.Drawing
++
++Add-Type @'
++using System;
++using System.Runtime.InteropServices;
++public static class Win32Window {
++    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
++    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
++    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
++    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
++}
++'@
++
++$proc = Get-Process -Name $ProcessName -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
++if (-not $proc) { throw "no window found for process $ProcessName" }
++$h = $proc.MainWindowHandle
++
++$rect = New-Object Win32Window+RECT
++[Win32Window]::GetWindowRect($h, [ref]$rect) | Out-Null
++$width = $rect.Right - $rect.Left
++$height = $rect.Bottom - $rect.Top
++if ($width -le 0 -or $height -le 0) {
++    [Win32Window]::ShowWindow($h, 9) | Out-Null     # SW_RESTORE
++    Start-Sleep -Milliseconds 800
++    [Win32Window]::GetWindowRect($h, [ref]$rect) | Out-Null
++    $width = $rect.Right - $rect.Left
++    $height = $rect.Bottom - $rect.Top
++}
++if ($width -le 0 -or $height -le 0) { throw "bad window rect" }
++
++function Save-Window($mode) {
++    $bmp = New-Object System.Drawing.Bitmap($width, $height)
++    $g = [System.Drawing.Graphics]::FromImage($bmp)
++    if ($mode -eq 'print') {
++        $hdc = $g.GetHdc()
++        [Win32Window]::PrintWindow($h, $hdc, 2) | Out-Null
++        $g.ReleaseHdc($hdc)
++    }
++    else {
++        $g.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
++    }
++    $g.Dispose()
++    $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
++    $bmp.Dispose()
++}
++
++Save-Window 'print'
++# blank check (PrintWindow can return an empty surface for some composition setups)
++$probe = New-Object System.Drawing.Bitmap($Out)
++$seen = @{}
++for ($x = 5; $x -lt $probe.Width; $x += 25) { for ($y = 5; $y -lt $probe.Height; $y += 25) { $seen[$probe.GetPixel($x, $y).ToArgb()] = 1 } }
++$probe.Dispose()
++if ($seen.Count -le 2) {
++    Write-Warning 'PrintWindow looks blank, falling back to a screen capture (window must be on top)'
++    Save-Window 'screen'
++}
++
++Write-Host "captured $width x $height -> $Out (distinct colors: $($seen.Count))"
 diff --git a/src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs b/src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs
 new file mode 100644
 index 0000000..6aa1177
@@ -2611,10 +4039,10 @@ index 0000000..ade9613
 +}
 diff --git a/src/Starward/Features/GachaOnly/GachaOnlyProfile.cs b/src/Starward/Features/GachaOnly/GachaOnlyProfile.cs
 new file mode 100644
-index 0000000..4002aea
+index 0000000..d3de4e1
 --- /dev/null
 +++ b/src/Starward/Features/GachaOnly/GachaOnlyProfile.cs
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,63 @@
 +// GachaOnly fork — single switch controlling every behavioural difference from upstream Starward.
 +//
 +// Rules for keeping `git rebase upstream/main` cheap:
@@ -2634,18 +4062,16 @@ index 0000000..4002aea
 +internal static class GachaOnlyProfile
 +{
 +
-+#if GACHA_ONLY
-+    private const bool BuildIsGachaOnly = true;
-+#else
-+    private const bool BuildIsGachaOnly = false;
-+#endif
-+
-+
 +    /// <summary>
-+    /// True for the standalone gacha-record build (<c>-p:GachaOnly=true</c>), false for a plain
-+    /// Starward build of the same source tree.
++    /// True for the standalone gacha-record build (<c>-p:GachaOnly=true</c>, the project default),
++    /// false for a plain Starward build of the same source tree (<c>-p:GachaOnly=false</c>).
++    /// The constant is generated by the project file (see the GenerateGachaOnlyMarker target) rather
++    /// than taken from DefineConstants, because a command line <c>-p:DefineConstants=...</c> is a
++    /// *global* MSBuild property and silently wins over anything the project appends — upstream's own
++    /// CI passes <c>-p:DefineConstants=DONOT_CHECK_UPDATE</c>, which used to drop our switch and ship
++    /// stock Starward branded as the gacha app. A generated const also survives the Release trimming.
 +    /// </summary>
-+    public static readonly bool Enabled = BuildIsGachaOnly;
++    public static readonly bool Enabled = GachaOnlyMarker.Enabled;
 +
 +
 +    /// <summary>
@@ -3021,7 +4447,7 @@ index 14bcea8..c688b40 100644
              }
          }
 diff --git a/src/Starward/Starward.csproj b/src/Starward/Starward.csproj
-index d922f57..943a039 100644
+index d922f57..670d185 100644
 --- a/src/Starward/Starward.csproj
 +++ b/src/Starward/Starward.csproj
 @@ -1,4 +1,4 @@
@@ -3030,7 +4456,7 @@ index d922f57..943a039 100644
  	<PropertyGroup>
  		<OutputType>WinExe</OutputType>
  		<TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
-@@ -82,4 +82,44 @@
+@@ -82,4 +82,79 @@
  		<Delete Files="$(PublishDir)onnxruntime.dll" />
  	</Target>
  
@@ -3047,31 +4473,66 @@ index d922f57..943a039 100644
 +	</PropertyGroup>
 +
 +	<PropertyGroup Condition="'$(GachaOnly)' == 'true'">
-+		<AssemblyName>Starward.GachaOnly</AssemblyName>
++		<!-- Named Starward.exe, not Starward.GachaOnly.exe: both the portable launcher in this fork and
++		     upstream's own C++ launcher (built by .github/workflows/build.yml) start
++		     app-<version>\Starward.exe, so the standard CI workflow produces a working package with no
++		     changes at all. -->
++		<AssemblyName>Starward</AssemblyName>
 +		<Product>Starward Gacha</Product>
-+		<DefineConstants>$(DefineConstants);GACHA_ONLY</DefineConstants>
-+		<!-- The build machine has no Windows SDK (no windows.winmd) and no Visual Studio: the CsWinRT
-+		     projection / AOT optimizer steps need one, while WinAppSDK already ships the C#
-+		     projection assemblies. Pass -p:WindowsSdkAvailable=true on a machine with a full SDK to
-+		     turn both steps back on (upstream's default behaviour). -->
++	</PropertyGroup>
++
++	<!-- The gacha switch is a *generated compile time constant*, not a DefineConstants entry and not a
++	     reflected attribute:
++	       * a command line -p:DefineConstants=... is a global MSBuild property and silently wins over
++	         anything this file appends (upstream CI passes -p:DefineConstants=DONOT_CHECK_UPDATE), which
++	         used to drop the constant and quietly produce stock Starward branded as the gacha app;
++	       * an AssemblyMetadata attribute would work, but it can only be read through reflection, and
++	         the Release publish trims the app.
++	     A generated const is immune to both. See GachaOnlyProfile.Enabled / GachaOnlyMarker. -->
++	<!-- BeforeBuild (and the later compile steps, for direct -t:CoreCompile style invocations): the file
++	     has to exist before WinUI's MarkupCompilePass2 compiles the project to resolve local XAML types,
++	     not just before the final C# compile. -->
++	<Target Name="GenerateGachaOnlyMarker" BeforeTargets="BeforeBuild;MarkupCompilePass1;MarkupCompilePass2;BeforeCompile;CoreCompile">
++		<PropertyGroup>
++			<_GachaOnlyMarkerFile>$(IntermediateOutputPath)GachaOnlyMarker.g.cs</_GachaOnlyMarkerFile>
++			<_GachaOnlyMarkerValue Condition="'$(GachaOnly)' == 'true'">true</_GachaOnlyMarkerValue>
++			<_GachaOnlyMarkerValue Condition="'$(GachaOnly)' != 'true'">false</_GachaOnlyMarkerValue>
++		</PropertyGroup>
++		<!-- the %3B is a literal semicolon: an unescaped one would split the Lines item list -->
++		<WriteLinesToFile File="$(_GachaOnlyMarkerFile)"
++		                  Overwrite="true"
++		                  WriteOnlyWhenDifferent="true"
++		                  Lines="// auto-generated by Starward.csproj (GachaOnly fork), do not edit;namespace Starward.Features.Gacha { internal static class GachaOnlyMarker { internal const bool Enabled = $(_GachaOnlyMarkerValue)%3B } }" />
++		<ItemGroup>
++			<Compile Include="$(_GachaOnlyMarkerFile)" Visible="false" />
++		</ItemGroup>
++	</Target>
++
++	<!-- Machine capability, not a fork feature: these apply to every build of this tree (stock too),
++	     so a bare machine can build both variants. -->
++	<PropertyGroup>
++		<!-- The CsWinRT projection and AOT optimizer steps need the Windows SDK (windows.winmd). On a
++		     machine that has it (the GitHub windows runner, a dev box with VS) upstream's Release
++		     configuration is left untouched — projection on, trimming on, AOT optimizer on — which is
++		     the combination upstream ships. On a bare machine the safe path below is used instead.
++		     Override explicitly with -p:WindowsSdkAvailable=true|false. -->
++		<WindowsSdkAvailable Condition="'$(WindowsSdkAvailable)' == '' and Exists('$(WindowsSdkDir)UnionMetadata\Windows.winmd')">true</WindowsSdkAvailable>
 +		<WindowsSdkAvailable Condition="'$(WindowsSdkAvailable)' == ''">false</WindowsSdkAvailable>
++
++		<!-- Without the SDK, disable every step that needs it. Trimming and ReadyToRun must go together
++		     with the CsWinRT AOT optimizer: a trimmed build without it dies at XAML startup with
++		     0xC000027B. -->
 +		<CsWinRTGenerateProjection Condition="'$(WindowsSdkAvailable)' != 'true'">false</CsWinRTGenerateProjection>
 +		<CsWinRTAotOptimizerEnabled Condition="'$(WindowsSdkAvailable)' != 'true'">false</CsWinRTAotOptimizerEnabled>
-+		<!-- Trimming / ReadyToRun depend on the CsWinRT AOT optimizer to keep the XAML types alive;
-+		     without it a trimmed Release build dies at XAML startup with 0xC000027B. Disable both when
-+		     the SDK is missing (size is not a concern for this fork). build.ps1 passes the same two
-+		     properties on the command line, which wins over the publish profile. -->
++		<!-- The publish profile (Properties/PublishProfiles/win-$(Platform).pubxml, selected by line 13
++		     above) is imported *after* this file and would put PublishTrimmed/PublishReadyToRun back to
++		     true, so it has to be deselected rather than overridden. SelfContained comes from the same
++		     profile, hence the explicit value here. -->
++		<PublishProfile Condition="'$(WindowsSdkAvailable)' != 'true'"></PublishProfile>
++		<SelfContained Condition="'$(WindowsSdkAvailable)' != 'true' and '$(SelfContained)' == ''">true</SelfContained>
 +		<PublishTrimmed Condition="'$(WindowsSdkAvailable)' != 'true'">false</PublishTrimmed>
 +		<PublishReadyToRun Condition="'$(WindowsSdkAvailable)' != 'true'">false</PublishReadyToRun>
 +	</PropertyGroup>
 +	<!-- ==================== end GachaOnly customization =================== -->
-+	<!-- Portable package layout: the release archive keeps Starward's own shape, i.e. a launcher
-+	     next to app-<version>\Starward.exe, so the published app is named Starward.exe when this
-+	     switch is on (gacha-fork/package.ps1 passes -p:PortableLayout=true). Development builds stay
-+	     Starward.GachaOnly.exe. Deliberately not a command-line AssemblyName override: that is a
-+	     global property and would rename every referenced project as well. -->
-+	<PropertyGroup Condition="'$(GachaOnly)' == 'true' and '$(PortableLayout)' == 'true'">
-+		<AssemblyName>Starward</AssemblyName>
-+	</PropertyGroup>
 +
  </Project>

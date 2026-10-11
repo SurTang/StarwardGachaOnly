@@ -1,0 +1,12 @@
+# GachaOnly fork build output — never part of the source package or the repo history.
+dist/
+out/
+backup/
+
+# launcher intermediate output
+launcher/bin/
+launcher/obj/
+
+# generated from the fork commit by build tooling
+gacha-only.patch
+gacha-only.diff

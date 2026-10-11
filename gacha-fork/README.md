@@ -40,7 +40,7 @@ NavigationViewItem_GachaLog.Visibility = CurrentGameFeatureConfig.SupportedPages
 | `src/Starward/Features/GachaOnly/GachaOnlyDataFolder.cs` | 共用数据目录解析（见第 3 节） |
 | `src/Starward/Features/GachaOnly/GachaOnlyUnsupportedPage.xaml(.cs)` | 「该游戏没有抽卡记录」提示页（中/日/英，不往 `Lang` 资源里加 key） |
 | `src/Starward/Features/GachaOnly/GachaExportModels.cs` | 导出图片的数据模型 + 总览指标计算 + 分页 + 图标加载 |
-| `src/Starward/Features/GachaOnly/GachaExportCard.xaml(.cs)` | 导出图片的卡片视觉（浅色、固定宽度、代码布局，见第 8 节） |
+| `src/Starward/Features/GachaOnly/GachaExportCard.xaml(.cs)` | 导出图片的卡片视觉（浅色、固定宽度、代码布局，见第 7 节） |
 | `src/Starward/Features/GachaOnly/GachaExportWindow.xaml(.cs)` | 预览窗口 + 保存 PNG / 复制到剪贴板；分页渲染并拼接 |
 | `src/Starward/Features/GachaOnly/GachaExportCli.cs` | 无头导出命令行 `--export-gacha-image` |
 | `src/Starward.Core/HoYoPlay/HoYoPlayClientLegacyOverloads.cs` | 上游破损的兼容层，见第 6 节；上游修好后可整文件删除 |
@@ -51,7 +51,7 @@ NavigationViewItem_GachaLog.Visibility = CurrentGameFeatureConfig.SupportedPages
 |---|---|
 | `Features/GameFeatureConfig.cs` | `return ApplyGachaOnlyProfile(config, gameId.GameBiz);` |
 | `Features/ViewHost/MainView.xaml.cs` | ① `NavigateTo` 的两处 `typeof(GameLauncherPage)` 兜底 → `GachaOnlyProfile.GetFallbackPage(...)`；② 抽卡页在导航栏保持选中；③ 关闭上游更新检查 |
-| `Features/ViewHost/MainWindow.xaml.cs` | 窗口可自由缩放 + 最大化（`presenter.IsResizable/IsMaximizable = GachaOnlyProfile.Enabled`；`Show()` 不再把窗口拉回 1200×676；`SC_MAXIMIZE` 只在 stock 构建里吞掉，见第 8 节） |
+| `Features/ViewHost/MainWindow.xaml.cs` | 窗口可自由缩放 + 最大化（`presenter.IsResizable/IsMaximizable = GachaOnlyProfile.Enabled`；`Show()` 不再把窗口拉回 1200×676；`SC_MAXIMIZE` 只在 stock 构建里吞掉，见第 8 节）） |
 | `Features/Gacha/GachaLogPage.xaml(.cs)` | 顶栏增加「导出为图片」「导出统计数量」两个按钮（同一样式，stock 构建下隐藏） |
 | `App.xaml.cs` | ① `starward://` 不处理；② `starward://test/` 不处理；③ 跳过 `--hide` 托盘启动分支；④ 独立实例键 `StarwardGacha` + 窗口标题 `Starward Gacha`；⑤ 无头导出命令行 hook |
 | `AppConfig.Configuration.cs` | `userDataFolder = GachaOnlyDataFolder.Resolve() ?? userDataFolder;` |
@@ -127,7 +127,7 @@ E:\A-Dev\deepseek-harness\.dotnet\dotnet.exe publish src\Starward\Starward.cspro
 .\gacha-fork\sync-upstream.ps1 -Merge   # 用 merge 代替 rebase
 ```
 
-模型：fork 只有**一个**提交贴在 `upstream/main` 上面，冲突只可能出现在第 2 节表格里那 7 个文件、
+模型：fork 只有**一个**提交贴在 `upstream/main` 上面，冲突只可能出现在第 2 节表格里那 10 个文件、
 且是 1~4 行级别。上游改 `Features/Gacha/**`（新卡池、新游戏、bug 修复）**零冲突**，直接继承。
 
 `gacha-fork/gacha-only.patch`（`git am` 可用）与 `gacha-fork/gacha-only.diff`（纯 diff，便于审阅）
@@ -226,7 +226,7 @@ Starward.GachaOnly.exe --export-gacha-counts counts.png [--uid 110369802] [--gam
 
 ---
 
-## 9. 打包（源码包 / 便携包）
+## 8. 打包（源码包 / 便携包）
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File gacha-fork\package.ps1 -Version 0.1.0 `
@@ -243,6 +243,67 @@ powershell.exe -ExecutionPolicy Bypass -File gacha-fork\package.ps1 -Version 0.1
 源码包里的入口文档以本 fork 为主：根 `README.md` = `gacha-fork/PACKAGE-README.md`（说明这是什么项目、怎么编、
 改动面），上游原版另存为 `README.upstream.md`（仓库内的 `README.md` 保持上游原文不动，避免每次上游改 README
 都冲突）。
+
+### 在 GitHub Actions 上打包
+
+先看清**哪个文件在什么时候跑** —— GitHub 会把所有 `on:` 匹配的工作流都跑一遍，它们是并存的：
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `build.yml`（上游） | push 到 `main` / `dev/*`、PR | 编 C++ 启动器 + app → `build/Starward/` 上传 artifact，版本号 `0.0.1-build.<sha>`；**不看 tag、不发 Release** |
+| `publish_preview.yml` / `_2` / `_3`（上游） | **任意 tag**（`tags: ["*"]`） | 需要上游的 SignPath / OSS / 签名密钥 —— fork 里必然失败，而且 `merge-publish` 会去创建 **draft release** |
+| `convert_preview_to_stable.yml`、`publish_res_signpath.yml`（上游） | 手工 | 上游发布流程的后续步骤，fork 里用不到 |
+| **`gacha-package.yml`（本 fork 新增）** | `workflow_dispatch` 手工，或 `push` 标签 `gacha-*` | 调 `package.ps1` 出两个 zip；**tag 触发时自动建 GitHub Release 并把两个 zip 挂成资产** |
+
+所以：
+
+- **推 `main`** → 只有 `build.yml`（artifact，不发 Release）；它现在能出**配套可用**的包：C++ 启动器 +
+  `app-build.<sha>\Starward.exe` + `version.ini=build.<sha>` 正好对得上（见上一节的坑与修法）。
+- **想要 Release** → 推 `gacha-*` 标签，或手工触发 `Gacha Package`（可勾选顺便发 Release）：
+  ```bash
+  git tag gacha-0.1.0 && git push origin gacha-0.1.0
+  ```
+
+> ⚠️ **推 tag 前先在 fork 里禁用上游那三个 tag 工作流**，否则它们会同时被触发：既报一堆没密钥的失败，又可能先建出一个
+> **draft release**，而 GitHub Release 是按 tag 定位的 —— 我的发布步骤会往那个 draft 上挂资产，结果发布停在草稿态。
+> ```bash
+> gh workflow disable "Publish Preview"   --repo <owner>/<repo>
+> gh workflow disable "Publish Preview 2" --repo <owner>/<repo>
+> gh workflow disable "Publish Preview 3" --repo <owner>/<repo>
+> ```
+> 等价操作：仓库 Settings → Actions → General → 或在 Actions 列表里逐个 Disable workflow。禁用是仓库级设置，
+> **不需要改任何文件**（所以上游合并依然干净）。想改用 `v*` 之类更常规的标签，把 `gacha-package.yml` 的
+> `tags:` 加一项即可。
+
+### 坑：CI 上编出来的包为什么曾是坏的（已修）
+
+第一次在 GitHub Actions 上编出来的 artifact：启动器弹 "Starward files not found"，`Starward.GachaOnly.exe`
+双击也起不来（`0xC000027B`）。两个根因都不是 CI 的错：
+
+1. **`-p:DefineConstants=...` 是全局 MSBuild 属性，会静默盖掉项目内的赋值。**
+   `build.yml` 传了 `-p:DefineConstants=DONOT_CHECK_UPDATE`，而我在 csproj 里用
+   `<DefineConstants>$(DefineConstants);GACHA_ONLY</DefineConstants>` 追加常量 —— 项目文件对**全局**属性的赋值
+   会被忽略，`-define:` 里只剩 `DONOT_CHECK_UPDATE`。于是 `GachaOnlyProfile.Enabled` 恒为 false：编出来的是
+   "行为完全是原生 Starward、名字却叫 GachaOnly"的东西；它还会注册**上游的单实例键**，本机官方 Starward 一旦
+   开着，它启动即静默退出（"打不开"的观感）。
+   修法：开关改成 **MSBuild 生成的编译期常量**（`GenerateGachaOnlyMarker` target 写
+   `obj/…/GachaOnlyMarker.g.cs`，`GachaOnlyProfile.Enabled` 读它）。命令行全局属性盖不掉它，Release 裁剪也不会
+   把它裁掉（我先用的是 `AssemblyMetadata`，靠反射读，担心裁剪所以换掉了）。实测带
+   `-p:DefineConstants=DONOT_CHECK_UPDATE` 编译后日志仍是 `Standalone gacha build` ✔
+2. **发布配置在项目块之后导入，会把 `PublishTrimmed`/`PublishReadyToRun` 重新打开。**
+   csproj 第 13 行 `<PublishProfile>win-$(Platform).pubxml</PublishProfile>` 自动套用
+   `Properties/PublishProfiles/win-x64.pubxml`，其中写死 `PublishTrimmed=True`、`TrimMode=partial`、
+   `PublishReadyToRun=True`（Release）。我原来在 csproj 块里把这两个属性设成 false 是在**配置导入之前**，
+   于是被覆盖 → CI 上成了「trim ON + CsWinRT AOT 优化器 OFF」这个必崩组合（XAML 类型被裁掉，启动即
+   `0xC000027B`）。
+   修法：无 SDK 的机器**直接把 `PublishProfile` 清空**（并自己补 `SelfContained=true`），而不是去覆盖那两个属性；
+   有 SDK 的机器（CI、装了 VS 的开发机）走**上游原样配置**（裁剪 + 投影 + AOT 优化器全开）。
+
+顺带把 app 的 `AssemblyName` 固定成 `Starward`：上游和本 fork 的启动器都去找
+`app-<版本>\Starward.exe`，这样 CI 不加任何参数就是配套的包。`WindowsSdkAvailable` 改为**自动探测**
+（`Exists('$(WindowsSdkDir)UnionMetadata\Windows.winmd')`），也可显式 `-p:WindowsSdkAvailable=true|false` 覆盖；
+这组"机器能力"属性对 `-p:GachaOnly=false` 的原生构建同样生效，两种模式都能在本机编出来（实测：原生构建窗口标题
+`Starward`、抽卡构建标题 `Starward Gacha` 且日志有 `Standalone gacha build`）。
 
 便携包结构（和官方 `Starward_Portable_*.7z` 一样，只是按你的要求用 zip）：
 
@@ -269,7 +330,7 @@ StarwardGacha/
 
 ---
 
-## 10. 验证记录
+## 9. 验证记录
 
 1. `dotnet build -c Debug -p:GachaOnly=true`：`Starward.Language / Starward.Core / Starward.Setup.Core /
    Starward.RPC / Starward` 全部通过，产出 `Starward.GachaOnly.dll`。
@@ -308,12 +369,12 @@ StarwardGacha/
 
 ---
 
-## 9. 工具
+## 10. 工具
 
 | 脚本 | 用途 |
 |---|---|
 | `build.ps1` | 打包（默认 GachaOnly，`-Stock` 编原生 Starward） |
-| `package.ps1` | 打包源码包与便携包（见第 9 节，含启动器与 zip 产出） |
+| `package.ps1` | 打包源码包与便携包（见第 8 节，含启动器与 zip 产出） |
 | `launcher/` | 便携包启动器（C# 等价实现，单文件自包含） |
 | `sync-upstream.ps1` | rebase/merge 上游，列出补丁面与冲突文件 |
 | `tools/db_backup.py` | Starward 家族数据库热备份 + 抽卡表统计（`--src <目录> --label <名称>`） |
@@ -321,7 +382,7 @@ StarwardGacha/
 
 ---
 
-## 10. 仍未处理 / 需要决策
+## 11. 仍未处理 / 需要决策
 
 - `CloseWindowOption=Hide` 时关窗仍会最小化到托盘（只禁用了 `--hide` 启动分支）。想彻底不要托盘，
   需要在 `MainWindow`/`SystemTrayWindow` 里再挂钩。

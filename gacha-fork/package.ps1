@@ -53,12 +53,12 @@ if (-not $SkipBuild) {
     Remove-Item (Join-Path $stage 'launcher') -Recurse -Force
 
     Write-Output "[3/5] app -> $appFolder"
-    # PortableLayout=true makes the app project publish as app-<version>\Starward.exe, which is what
-    # the launcher (and upstream's own launcher) starts. Development builds stay Starward.GachaOnly.
+    # The app project already publishes as app-<version>\Starward.exe when GachaOnly is on (see the
+    # AssemblyName note in Starward.csproj), which is the name both this fork's launcher and
+    # upstream's C++ launcher start. Trimming/ReadyToRun are decided by the project as well.
     & $dotnet publish (Join-Path $repoRoot 'src\Starward\Starward.csproj') `
         -c Release -r "win-$Architecture" -p:Platform=$Architecture -p:Version=$Version `
-        -p:GachaOnly=true -p:PortableLayout=true -p:PublishTrimmed=false -p:PublishReadyToRun=false `
-        -o $appFolder -v m
+        -p:GachaOnly=true -o $appFolder -v m
     if ($LASTEXITCODE -ne 0) { throw 'app publish failed' }
 
     Write-Output "[4/5] version.ini"

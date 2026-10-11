@@ -1,0 +1,115 @@
+name: Gacha Package
+
+# Trigger routing (GitHub runs every workflow whose `on:` matches):
+#   build.yml            push to main/dev/*, PR  -> upstream build, artifacts only, no release
+#   publish_preview*.yml  ANY tag (tags: ["*"])  -> upstream release jobs, need upstream secrets
+#   this file            manual run, gacha-* tag -> the two archives, release on a tag
+#
+# IMPORTANT before pushing a tag: disable upstream's three publish workflows in the fork, otherwise
+# they fire as well, fail on missing secrets, and may create a *draft* release first — a release is
+# located by tag, so this job would then attach its assets to that draft and the release would stay
+# unpublished. Disabling is a repository setting, no file changes, so upstream still merges cleanly:
+#
+#   gh workflow disable "Publish Preview"   --repo <owner>/<repo>
+#   gh workflow disable "Publish Preview 2" --repo <owner>/<repo>
+#   gh workflow disable "Publish Preview 3" --repo <owner>/<repo>
+#
+# Archives produced (see gacha-fork/package.ps1):
+#   StarwardGacha_Portable_<version>_<arch>.zip   launcher + version.ini + app-<version>/
+#   StarwardGacha_Source_<version>.zip            source tree + gacha-fork/
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version stamped into version.ini and the archive names
+        required: true
+        default: 0.1.0
+      data_folder:
+        description: Optional UserDataFolder written into gacha-data.ini (leave empty to omit)
+        required: false
+        default: ''
+      publish_release:
+        description: Also create a GitHub Release for this manual run
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags: ['gacha-*']
+
+permissions:
+  contents: write
+
+jobs:
+
+  package:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Install .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        global-json-file: global.json
+
+    - name: Resolve version
+      id: ver
+      shell: pwsh
+      run: |
+        $version = "${{ github.event.inputs.version }}"
+        if ([string]::IsNullOrWhiteSpace($version)) {
+          $version = "${{ github.ref_name }}" -replace '^gacha-', ''
+        }
+        "version=$version" >> $env:GITHUB_OUTPUT
+        Write-Output "packaging $version for ${{ matrix.platform }}"
+
+    - name: Package (portable + source)
+      shell: pwsh
+      run: |
+        $arguments = @(
+          '-Version', '${{ steps.ver.outputs.version }}',
+          '-Architecture', '${{ matrix.platform }}'
+        )
+        $dataFolder = "${{ github.event.inputs.data_folder }}"
+        if (-not [string]::IsNullOrWhiteSpace($dataFolder)) {
+          $arguments += @('-DataFolder', $dataFolder)
+        }
+        & .\gacha-fork\package.ps1 @arguments
+
+    - name: Upload archives as workflow artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: StarwardGacha_${{ steps.ver.outputs.version }}_${{ matrix.platform }}
+        path: gacha-fork/dist/*.zip
+        if-no-files-found: error
+        retention-days: 30
+
+    - name: Publish GitHub Release
+      # a tag push always publishes; a manual run only when the input asks for it
+      if: startsWith(github.ref, 'refs/tags/gacha-') || inputs.publish_release == true
+      uses: softprops/action-gh-release@v3
+      with:
+        name: Starward Gacha ${{ steps.ver.outputs.version }}
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('gacha-{0}', steps.ver.outputs.version) }}
+        files: gacha-fork/dist/*.zip
+        draft: false
+        prerelease: false
+        body: |
+          Starward Gacha ${{ steps.ver.outputs.version }}（${{ matrix.platform }}）
+
+          独立抽卡记录应用：只保留祈愿记录模块，支持记录图导出与数量统计导出，窗口可自由缩放/最大化。
+
+          | 资产 | 说明 |
+          |---|---|
+          | `StarwardGacha_Portable_*.zip` | 便携版：`Starward.exe` 启动器 + `version.ini` + `app-<版本>/`，解压即用 |
+          | `StarwardGacha_Source_*.zip` | 源码包：完整源码树 + `gacha-fork/`（文档、脚本、启动器源码、补丁） |
+
+          - 与官方 Starward 共用同一个数据目录（便携包内 `gacha-data.ini` 可改，删掉则自动探测）
+          - 上游 [Scighost/Starward](https://github.com/Scighost/Starward)（MIT），署名与许可证原样保留
+          - 无代码签名，首次运行可能触发 SmartScreen 提示
